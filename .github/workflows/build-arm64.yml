@@ -80,7 +80,7 @@ jobs:
     - name: Install packages
       run: sudo apt install -y ccache libnuma-dev python3-setuptools
         python3-wheel python3-pip python3-pyelftools ninja-build libbsd-dev
-        libpcap-dev libibverbs-dev libcrypto++-dev libfdt-dev libjansson-dev clang-9
+        libpcap-dev libibverbs-dev libcrypto++-dev libfdt-dev libjansson-dev
     - name: Install libabigail build dependencies if no cache is available
       if: env.ABI_CHECKS == 'true' && steps.libabigail-cache.outputs.cache-hit != 'true'
       run: sudo apt install -y autoconf automake libtool pkg-config libxml2-dev
@@ -105,7 +105,7 @@ jobs:
         # Workaround on $HOME permissions as EAL checks them for plugin loading
         chmod o-w $HOME
     - name: Build and test
-      run: export PATH=$PATH:/usr/lib/llvm-9/bin/ && .ci/linux-build.sh
+      run: sudo apt install -y clang-9 && export PATH=$PATH:/usr/lib/llvm-9/bin/ && .ci/linux-build.sh
     - name: Upload logs on failure
       if: failure()
       uses: actions/upload-artifact@v2
