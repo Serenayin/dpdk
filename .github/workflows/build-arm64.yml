@@ -18,6 +18,7 @@ jobs:
       ABI_CHECKS: ${{ contains(matrix.config.checks, 'abi') }}
       BUILD_32BIT: ${{ matrix.config.cross == 'i386' }}
       BUILD_DOCS: ${{ contains(matrix.config.checks, 'doc') }}
+      CL: ${{ matrix.config.compiler == 'clang' }}
       CC: ccache ${{ matrix.config.compiler }}
       DEF_LIB: ${{ matrix.config.library }}
       LIBABIGAIL_VERSION: libabigail-1.8
@@ -104,8 +105,11 @@ jobs:
         .ci/linux-setup.sh
         # Workaround on $HOME permissions as EAL checks them for plugin loading
         chmod o-w $HOME
+    - name: Install clang
+      if: env.CL == 'true'
+      run: sudo apt install -y clang
     - name: Build and test
-      run: sudo apt install -y clang-10 && export PATH=$PATH:/usr/lib/llvm-10/bin/ && .ci/linux-build.sh
+      run: .ci/linux-build.sh
     - name: Upload logs on failure
       if: failure()
       uses: actions/upload-artifact@v2
