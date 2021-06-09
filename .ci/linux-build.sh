@@ -81,7 +81,7 @@ OPTS="$OPTS -Dmachine=default"
 OPTS="$OPTS --default-library=$DEF_LIB"
 OPTS="$OPTS --buildtype=debugoptimized"
 OPTS="$OPTS -Dcheck_includes=true"
-meson build --werror $OPTS
+meson build  $OPTS #--werror
 ninja -C build
 
 if [ "$AARCH64" != "true" ]; then
