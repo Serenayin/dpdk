@@ -36,10 +36,10 @@ jobs:
             library: shared
             checks: abi+doc+tests
           - os: [self-hosted,arm-ubuntu-20.04] #ubuntu-18.04
-            compiler: clang
+            compiler: clang-10
             library: static
           - os: [self-hosted,arm-ubuntu-20.04] #ubuntu-18.04
-            compiler: clang
+            compiler: clang-10
             library: shared
             checks: doc+tests
 
