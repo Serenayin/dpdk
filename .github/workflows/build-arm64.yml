@@ -14,16 +14,16 @@ jobs:
     name: ${{ join(matrix.config.*, '-') }}
     runs-on: ${{ matrix.config.os }}
     env:
-      AARCH64: ${{ matrix.config.cross == 'aarch64' }}
+      # AARCH64: ${{ matrix.config.cross == 'aarch64' }}
       ABI_CHECKS: ${{ contains(matrix.config.checks, 'abi') }}
-      BUILD_32BIT: ${{ matrix.config.cross == 'i386' }}
+      # BUILD_32BIT: ${{ matrix.config.cross == 'i386' }}
       BUILD_DOCS: ${{ contains(matrix.config.checks, 'doc') }}
       CL: ${{ matrix.config.compiler == 'clang' }}
       CC: ccache ${{ matrix.config.compiler }}
       DEF_LIB: ${{ matrix.config.library }}
       LIBABIGAIL_VERSION: libabigail-1.8
       REF_GIT_TAG: v21.05
-      RUN_TESTS: ${{ contains(matrix.config.checks, 'tests') }}
+      # RUN_TESTS: ${{ contains(matrix.config.checks, 'tests') }}
 
     strategy:
       fail-fast: false
@@ -86,15 +86,15 @@ jobs:
       if: env.ABI_CHECKS == 'true' && steps.libabigail-cache.outputs.cache-hit != 'true'
       run: sudo apt install -y autoconf automake libtool pkg-config libxml2-dev
           libdw-dev
-    - name: Install i386 cross compiling packages
-      if: env.BUILD_32BIT == 'true'
-      run: sudo apt install -y gcc-multilib-arm-linux-gnueabi
-    - name: Install aarch64 cross compiling packages
-      if: env.AARCH64 == 'true'
-      run: sudo apt install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross
-        pkg-config-aarch64-linux-gnu
+    #- name: Install i386 cross compiling packages
+    #  if: env.BUILD_32BIT == 'true'
+    #  run: sudo apt install -y gcc-multilib-arm-linux-gnueabi
+    #- name: Install aarch64 cross compiling packages
+    #  if: env.AARCH64 == 'true'
+    #  run: sudo apt install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+    #    pkg-config-aarch64-linux-gnu
     - name: Install test tools packages
-      if: env.AARCH64 != 'true' || env.RUN_TESTS == 'true'
+    #  if: env.AARCH64 != 'true' || env.RUN_TESTS == 'true'
       run: sudo apt install -y gdb
     - name: Install doc generation packages
       if: env.BUILD_DOCS == 'true'
