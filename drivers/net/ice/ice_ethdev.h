@@ -475,7 +475,6 @@ struct ice_devargs {
 struct ice_adapter {
 	/* Common for both PF and VF */
 	struct ice_hw hw;
-	struct rte_eth_dev *eth_dev;
 	struct ice_pf pf;
 	bool rx_bulk_alloc_allowed;
 	bool rx_vec_allowed;
@@ -487,6 +486,12 @@ struct ice_adapter {
 	struct ice_devargs devargs;
 	enum ice_pkg_type active_pkg_type; /* loaded ddp package type */
 	uint16_t fdir_ref_cnt;
+#ifdef RTE_ARCH_X86
+	bool rx_use_avx2;
+	bool rx_use_avx512;
+	bool tx_use_avx2;
+	bool tx_use_avx512;
+#endif
 };
 
 struct ice_vsi_vlan_pvid_info {
@@ -520,8 +525,6 @@ struct ice_vsi_vlan_pvid_info {
 	(&(((struct ice_vsi *)vsi)->adapter->hw))
 #define ICE_VSI_TO_PF(vsi) \
 	(&(((struct ice_vsi *)vsi)->adapter->pf))
-#define ICE_VSI_TO_ETH_DEV(vsi) \
-	(((struct ice_vsi *)vsi)->adapter->eth_dev)
 
 /* ICE_PF_TO */
 #define ICE_PF_TO_HW(pf) \
@@ -531,7 +534,8 @@ struct ice_vsi_vlan_pvid_info {
 #define ICE_PF_TO_ETH_DEV(pf) \
 	(((struct ice_pf *)pf)->adapter->eth_dev)
 
-enum ice_pkg_type ice_load_pkg_type(struct ice_hw *hw);
+int
+ice_load_pkg(struct ice_adapter *adapter, bool use_dsn, uint64_t dsn);
 struct ice_vsi *
 ice_setup_vsi(struct ice_pf *pf, enum ice_vsi_type type);
 int

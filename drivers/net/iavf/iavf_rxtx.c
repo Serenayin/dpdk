@@ -57,6 +57,18 @@ iavf_proto_xtr_type_to_rxdid(uint8_t flex_type)
 				rxdid_map[flex_type] : IAVF_RXDID_COMMS_OVS_1;
 }
 
+static int
+iavf_monitor_callback(const uint64_t value,
+		const uint64_t arg[RTE_POWER_MONITOR_OPAQUE_SZ] __rte_unused)
+{
+	const uint64_t m = rte_cpu_to_le_64(1 << IAVF_RX_DESC_STATUS_DD_SHIFT);
+	/*
+	 * we expect the DD bit to be set to 1 if this descriptor was already
+	 * written to.
+	 */
+	return (value & m) == m ? -1 : 0;
+}
+
 int
 iavf_get_monitor_addr(void *rx_queue, struct rte_power_monitor_cond *pmc)
 {
@@ -69,12 +81,8 @@ iavf_get_monitor_addr(void *rx_queue, struct rte_power_monitor_cond *pmc)
 	/* watch for changes in status bit */
 	pmc->addr = &rxdp->wb.qword1.status_error_len;
 
-	/*
-	 * we expect the DD bit to be set to 1 if this descriptor was already
-	 * written to.
-	 */
-	pmc->val = rte_cpu_to_le_64(1 << IAVF_RX_DESC_STATUS_DD_SHIFT);
-	pmc->mask = rte_cpu_to_le_64(1 << IAVF_RX_DESC_STATUS_DD_SHIFT);
+	/* comparison callback */
+	pmc->fn = iavf_monitor_callback;
 
 	/* registers are 64-bit */
 	pmc->size = sizeof(uint64_t);
@@ -700,7 +708,8 @@ iavf_dev_tx_queue_setup(struct rte_eth_dev *dev,
 		tx_conf->tx_rs_thresh : DEFAULT_TX_RS_THRESH);
 	tx_free_thresh = (uint16_t)((tx_conf->tx_free_thresh) ?
 		tx_conf->tx_free_thresh : DEFAULT_TX_FREE_THRESH);
-	check_tx_thresh(nb_desc, tx_rs_thresh, tx_rs_thresh);
+	if (check_tx_thresh(nb_desc, tx_rs_thresh, tx_free_thresh) != 0)
+		return -EINVAL;
 
 	/* Free memory if needed. */
 	if (dev->data->tx_queues[queue_idx]) {
@@ -783,6 +792,22 @@ iavf_dev_tx_queue_setup(struct rte_eth_dev *dev,
 		struct iavf_adapter *ad =
 			IAVF_DEV_PRIVATE_TO_ADAPTER(dev->data->dev_private);
 		ad->tx_vec_allowed = false;
+	}
+
+	if (vf->vf_res->vf_cap_flags & VIRTCHNL_VF_OFFLOAD_QOS &&
+	    vf->tm_conf.committed) {
+		int tc;
+		for (tc = 0; tc < vf->qos_cap->num_elem; tc++) {
+			if (txq->queue_id >= vf->qtc_map[tc].start_queue_id &&
+			    txq->queue_id < (vf->qtc_map[tc].start_queue_id +
+			    vf->qtc_map[tc].queue_count))
+				break;
+		}
+		if (tc >= vf->qos_cap->num_elem) {
+			PMD_INIT_LOG(ERR, "Queue TC mapping is not correct");
+			return -EINVAL;
+		}
+		txq->tc = tc;
 	}
 
 	return 0;
@@ -1161,7 +1186,7 @@ iavf_update_rx_tail(struct iavf_rx_queue *rxq, uint16_t nb_hold, uint16_t rx_id)
 			   rxq->port_id, rxq->queue_id, rx_id, nb_hold);
 		rx_id = (uint16_t)((rx_id == 0) ?
 			(rxq->nb_rx_desc - 1) : (rx_id - 1));
-		IAVF_PCI_REG_WRITE(rxq->qrx_tail, rx_id);
+		IAVF_PCI_REG_WC_WRITE(rxq->qrx_tail, rx_id);
 		nb_hold = 0;
 	}
 	rxq->nb_rx_hold = nb_hold;
@@ -1218,6 +1243,7 @@ iavf_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts, uint16_t nb_pkts)
 		rxd = *rxdp;
 		nb_hold++;
 		rxe = rxq->sw_ring[rx_id];
+		rxq->sw_ring[rx_id] = nmb;
 		rx_id++;
 		if (unlikely(rx_id == rxq->nb_rx_desc))
 			rx_id = 0;
@@ -1323,6 +1349,7 @@ iavf_recv_pkts_flex_rxd(void *rx_queue,
 		rxd = *rxdp;
 		nb_hold++;
 		rxe = rxq->sw_ring[rx_id];
+		rxq->sw_ring[rx_id] = nmb;
 		rx_id++;
 		if (unlikely(rx_id == rxq->nb_rx_desc))
 			rx_id = 0;
@@ -1414,6 +1441,7 @@ iavf_recv_scattered_pkts_flex_rxd(void *rx_queue, struct rte_mbuf **rx_pkts,
 		rxd = *rxdp;
 		nb_hold++;
 		rxe = rxq->sw_ring[rx_id];
+		rxq->sw_ring[rx_id] = nmb;
 		rx_id++;
 		if (rx_id == rxq->nb_rx_desc)
 			rx_id = 0;
@@ -1567,6 +1595,7 @@ iavf_recv_scattered_pkts(void *rx_queue, struct rte_mbuf **rx_pkts,
 		rxd = *rxdp;
 		nb_hold++;
 		rxe = rxq->sw_ring[rx_id];
+		rxq->sw_ring[rx_id] = nmb;
 		rx_id++;
 		if (rx_id == rxq->nb_rx_desc)
 			rx_id = 0;
@@ -1906,7 +1935,7 @@ iavf_rx_alloc_bufs(struct iavf_rx_queue *rxq)
 
 	/* Update rx tail register */
 	rte_wmb();
-	IAVF_PCI_REG_WRITE_RELAXED(rxq->qrx_tail, rxq->rx_free_trigger);
+	IAVF_PCI_REG_WC_WRITE_RELAXED(rxq->qrx_tail, rxq->rx_free_trigger);
 
 	rxq->rx_free_trigger =
 		(uint16_t)(rxq->rx_free_trigger + rxq->rx_free_thresh);
@@ -2332,10 +2361,31 @@ end_of_tx:
 	PMD_TX_LOG(DEBUG, "port_id=%u queue_id=%u tx_tail=%u nb_tx=%u",
 		   txq->port_id, txq->queue_id, tx_id, nb_tx);
 
-	IAVF_PCI_REG_WRITE_RELAXED(txq->qtx_tail, tx_id);
+	IAVF_PCI_REG_WC_WRITE_RELAXED(txq->qtx_tail, tx_id);
 	txq->tx_tail = tx_id;
 
 	return nb_tx;
+}
+
+/* Check if the packet with vlan user priority is transmitted in the
+ * correct queue.
+ */
+static int
+iavf_check_vlan_up2tc(struct iavf_tx_queue *txq, struct rte_mbuf *m)
+{
+	struct rte_eth_dev *dev = &rte_eth_devices[txq->port_id];
+	struct iavf_info *vf = IAVF_DEV_PRIVATE_TO_VF(dev->data->dev_private);
+	uint16_t up;
+
+	up = m->vlan_tci >> IAVF_VLAN_TAG_PCP_OFFSET;
+
+	if (!(vf->qos_cap->cap[txq->tc].tc_prio & BIT(up))) {
+		PMD_TX_LOG(ERR, "packet with vlan pcp %u cannot transmit in queue %u\n",
+			up, txq->queue_id);
+		return -1;
+	} else {
+		return 0;
+	}
 }
 
 /* TX prep functions */
@@ -2346,6 +2396,9 @@ iavf_prep_pkts(__rte_unused void *tx_queue, struct rte_mbuf **tx_pkts,
 	int i, ret;
 	uint64_t ol_flags;
 	struct rte_mbuf *m;
+	struct iavf_tx_queue *txq = tx_queue;
+	struct rte_eth_dev *dev = &rte_eth_devices[txq->port_id];
+	struct iavf_info *vf = IAVF_DEV_PRIVATE_TO_VF(dev->data->dev_private);
 
 	for (i = 0; i < nb_pkts; i++) {
 		m = tx_pkts[i];
@@ -2380,6 +2433,15 @@ iavf_prep_pkts(__rte_unused void *tx_queue, struct rte_mbuf **tx_pkts,
 		if (ret != 0) {
 			rte_errno = -ret;
 			return i;
+		}
+
+		if (vf->vf_res->vf_cap_flags & VIRTCHNL_VF_OFFLOAD_QOS &&
+		    ol_flags & (PKT_RX_VLAN_STRIPPED | PKT_RX_VLAN)) {
+			ret = iavf_check_vlan_up2tc(txq, m);
+			if (ret != 0) {
+				rte_errno = -ret;
+				return i;
+			}
 		}
 	}
 

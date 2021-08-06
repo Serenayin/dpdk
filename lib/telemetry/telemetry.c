@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/stat.h>
 #include <dlfcn.h>
 #endif /* !RTE_EXEC_ENV_WINDOWS */
 
@@ -26,9 +27,6 @@
 #define MAX_HELP_LEN 64
 #define MAX_OUTPUT_LEN (1024 * 16)
 #define MAX_CONNECTIONS 10
-
-/** Maximum number of telemetry callbacks. */
-#define TELEMETRY_MAX_CALLBACKS 64
 
 #ifndef RTE_EXEC_ENV_WINDOWS
 static void *
@@ -62,7 +60,7 @@ static uint32_t logtype;
         rte_log_ptr(RTE_LOG_ ## l, logtype, "TELEMETRY: " __VA_ARGS__)
 
 /* list of command callbacks, with one command registered by default */
-static struct cmd_callback callbacks[TELEMETRY_MAX_CALLBACKS];
+static struct cmd_callback *callbacks;
 static int num_callbacks; /* How many commands are registered */
 /* Used when accessing or modifying list of command callbacks */
 static rte_spinlock_t callback_sl = RTE_SPINLOCK_INITIALIZER;
@@ -73,15 +71,21 @@ static uint16_t v2_clients;
 int
 rte_telemetry_register_cmd(const char *cmd, telemetry_cb fn, const char *help)
 {
+	struct cmd_callback *new_callbacks;
 	int i = 0;
 
 	if (strlen(cmd) >= MAX_CMD_LEN || fn == NULL || cmd[0] != '/'
 			|| strlen(help) >= MAX_HELP_LEN)
 		return -EINVAL;
-	if (num_callbacks >= TELEMETRY_MAX_CALLBACKS)
-		return -ENOENT;
 
 	rte_spinlock_lock(&callback_sl);
+	new_callbacks = realloc(callbacks, sizeof(callbacks[0]) * (num_callbacks + 1));
+	if (new_callbacks == NULL) {
+		rte_spinlock_unlock(&callback_sl);
+		return -ENOMEM;
+	}
+	callbacks = new_callbacks;
+
 	while (i < num_callbacks && strcmp(cmd, callbacks[i].cmd) > 0)
 		i++;
 	if (i != num_callbacks)
@@ -419,7 +423,11 @@ create_socket(char *path)
 	strlcpy(sun.sun_path, path, sizeof(sun.sun_path));
 	unlink(sun.sun_path);
 	if (bind(sock, (void *) &sun, sizeof(sun)) < 0) {
+		struct stat st;
+
 		TMTY_LOG(ERR, "Error binding socket: %s\n", strerror(errno));
+		if (stat(socket_dir, &st) < 0 || !S_ISDIR(st.st_mode))
+			TMTY_LOG(ERR, "Cannot access DPDK runtime directory: %s\n", socket_dir);
 		sun.sun_path[0] = 0;
 		goto error;
 	}

@@ -243,6 +243,7 @@ em_mask_key(void *key, xmm_t mask)
 #error No vector engine (SSE, NEON, ALTIVEC) available, check your toolchain
 #endif
 
+/* Performing hash-based lookups. 8< */
 static inline uint16_t
 em_get_ipv4_dst_port(void *ipv4_hdr, uint16_t portid, void *lookup_struct)
 {
@@ -264,6 +265,7 @@ em_get_ipv4_dst_port(void *ipv4_hdr, uint16_t portid, void *lookup_struct)
 	ret = rte_hash_lookup(ipv4_l3fwd_lookup_struct, (const void *)&key);
 	return (ret < 0) ? portid : ipv4_l3fwd_out_if[ret];
 }
+/* >8 End of performing hash-based lookups. */
 
 static inline uint16_t
 em_get_ipv6_dst_port(void *ipv6_hdr, uint16_t portid, void *lookup_struct)
@@ -632,14 +634,16 @@ em_main_loop(__rte_unused void *dummy)
 	lcore_id = rte_lcore_id();
 	qconf = &lcore_conf[lcore_id];
 
-	if (qconf->n_rx_queue == 0) {
+	const uint16_t n_rx_q = qconf->n_rx_queue;
+	const uint16_t n_tx_p = qconf->n_tx_port;
+	if (n_rx_q == 0) {
 		RTE_LOG(INFO, L3FWD, "lcore %u has nothing to do\n", lcore_id);
 		return 0;
 	}
 
 	RTE_LOG(INFO, L3FWD, "entering main loop on lcore %u\n", lcore_id);
 
-	for (i = 0; i < qconf->n_rx_queue; i++) {
+	for (i = 0; i < n_rx_q; i++) {
 
 		portid = qconf->rx_queue_list[i].port_id;
 		queueid = qconf->rx_queue_list[i].queue_id;
@@ -659,7 +663,7 @@ em_main_loop(__rte_unused void *dummy)
 		diff_tsc = cur_tsc - prev_tsc;
 		if (unlikely(diff_tsc > drain_tsc)) {
 
-			for (i = 0; i < qconf->n_tx_port; ++i) {
+			for (i = 0; i < n_tx_p; ++i) {
 				portid = qconf->tx_port_id[i];
 				if (qconf->tx_mbufs[portid].len == 0)
 					continue;
@@ -675,7 +679,7 @@ em_main_loop(__rte_unused void *dummy)
 		/*
 		 * Read packet from RX queues
 		 */
-		for (i = 0; i < qconf->n_rx_queue; ++i) {
+		for (i = 0; i < n_rx_q; ++i) {
 			portid = qconf->rx_queue_list[i].port_id;
 			queueid = qconf->rx_queue_list[i].queue_id;
 			nb_rx = rte_eth_rx_burst(portid, queueid, pkts_burst,
@@ -874,9 +878,7 @@ em_event_main_loop_tx_q_burst(__rte_unused void *dummy)
 	return 0;
 }
 
-/*
- * Initialize exact match (hash) parameters.
- */
+/* Initialize exact match (hash) parameters. 8< */
 void
 setup_hash(const int socketid)
 {
@@ -951,6 +953,7 @@ setup_hash(const int socketid)
 		}
 	}
 }
+/* >8 End of initialization of hash parameters. */
 
 /* Return ipv4/ipv6 em fwd lookup struct. */
 void *

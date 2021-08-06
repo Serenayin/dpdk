@@ -488,6 +488,7 @@ struct hns3_hw {
 	struct hns3_rx_missed_stats imissed_stats;
 	uint64_t oerror_stats;
 	uint32_t fw_version;
+	uint16_t pf_vf_if_version;  /* version of communication interface */
 
 	uint16_t num_msi;
 	uint16_t total_tqps_num;    /* total task queue pairs of this PF */
@@ -629,6 +630,9 @@ struct hns3_hw {
 	struct hns3_port_base_vlan_config port_base_vlan_cfg;
 
 	pthread_mutex_t flows_lock; /* rte_flow ops lock */
+	struct hns3_fdir_rule_list flow_fdir_list; /* flow fdir rule list */
+	struct hns3_rss_filter_list flow_rss_list; /* flow RSS rule list */
+	struct hns3_flow_mem_list flow_list;
 
 	/*
 	 * PMD setup and configuration is not thread safe. Since it is not
@@ -782,6 +786,7 @@ struct hns3_pf {
 	uint8_t prio_tc[HNS3_MAX_USER_PRIO]; /* TC indexed by prio */
 	uint16_t pause_time;
 	bool support_fc_autoneg;       /* support FC autonegotiate */
+	bool support_multi_tc_pause;
 
 	uint16_t wanted_umv_size;
 	uint16_t max_umv_size;
@@ -862,11 +867,14 @@ enum {
 	HNS3_DEV_SUPPORT_COPPER_B,
 	HNS3_DEV_SUPPORT_FD_QUEUE_REGION_B,
 	HNS3_DEV_SUPPORT_PTP_B,
+	HNS3_DEV_SUPPORT_TX_PUSH_B,
 	HNS3_DEV_SUPPORT_INDEP_TXRX_B,
 	HNS3_DEV_SUPPORT_STASH_B,
 	HNS3_DEV_SUPPORT_RXD_ADV_LAYOUT_B,
 	HNS3_DEV_SUPPORT_OUTER_UDP_CKSUM_B,
 	HNS3_DEV_SUPPORT_RAS_IMP_B,
+	HNS3_DEV_SUPPORT_TM_B,
+	HNS3_DEV_SUPPORT_VF_VLAN_FLT_MOD_B,
 };
 
 #define hns3_dev_dcb_supported(hw) \
@@ -899,6 +907,15 @@ enum {
 
 #define hns3_dev_ras_imp_supported(hw) \
 	hns3_get_bit((hw)->capability, HNS3_DEV_SUPPORT_RAS_IMP_B)
+
+#define hns3_dev_tx_push_supported(hw) \
+		hns3_get_bit((hw)->capability, HNS3_DEV_SUPPORT_TX_PUSH_B)
+
+#define hns3_dev_tm_supported(hw) \
+	hns3_get_bit((hw)->capability, HNS3_DEV_SUPPORT_TM_B)
+
+#define hns3_dev_vf_vlan_flt_supported(hw) \
+	hns3_get_bit((hw)->capability, HNS3_DEV_SUPPORT_VF_VLAN_FLT_MOD_B)
 
 #define HNS3_DEV_PRIVATE_TO_HW(adapter) \
 	(&((struct hns3_adapter *)adapter)->hw)

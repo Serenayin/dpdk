@@ -55,6 +55,8 @@ The detailed information can refer to chapter Tested Platforms/Tested NICs in re
    +-----------+---------------+-----------------+-----------+--------------+-----------+
    |    21.02  |     1.4.11    |      1.3.24     |  1.3.28   |    1.3.4     |    2.4    |
    +-----------+---------------+-----------------+-----------+--------------+-----------+
+   |    21.05  |     1.6.5     |      1.3.26     |  1.3.30   |    1.3.6     |    3.0    |
+   +-----------+---------------+-----------------+-----------+--------------+-----------+
 
 Pre-Installation Configuration
 ------------------------------
@@ -208,6 +210,14 @@ Runtime Config Options
 
   The ``rte_net_ice_dump_proto_xtr_metadata`` routine shows how to
   access the protocol extraction result in ``struct rte_mbuf``.
+
+- ``Hardware debug mask log support`` (default ``0``)
+
+  User can enable the related hardware debug mask such as ICE_DBG_NVM::
+
+    -a 0000:88:00.0,hw_debug_mask=0x80 --log-level=pmd.net.ice.driver:8
+
+  These ICE_DBG_XXX are defined in ``drivers/net/ice/base/ice_type.h``.
 
 Driver compilation and testing
 ------------------------------

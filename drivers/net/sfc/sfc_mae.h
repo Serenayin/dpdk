@@ -16,6 +16,8 @@
 
 #include "efx.h"
 
+#include "sfc_stats.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -54,10 +56,20 @@ struct sfc_mae_encap_header {
 
 TAILQ_HEAD(sfc_mae_encap_headers, sfc_mae_encap_header);
 
+/* Counter ID */
+struct sfc_mae_counter_id {
+	/* ID of a counter in MAE */
+	efx_counter_t			mae_id;
+	/* ID of a counter in RTE */
+	uint32_t			rte_id;
+};
+
 /** Action set registry entry */
 struct sfc_mae_action_set {
 	TAILQ_ENTRY(sfc_mae_action_set)	entries;
 	unsigned int			refcnt;
+	struct sfc_mae_counter_id	*counters;
+	uint32_t			n_counters;
 	efx_mae_actions_t		*spec;
 	struct sfc_mae_encap_header	*encap_header;
 	struct sfc_mae_fw_rsrc		fw_rsrc;
@@ -83,6 +95,50 @@ struct sfc_mae_bounce_eh {
 	efx_tunnel_protocol_t		type;
 };
 
+/** Counter collection entry */
+struct sfc_mae_counter {
+	bool				inuse;
+	uint32_t			generation_count;
+	union sfc_pkts_bytes		value;
+	union sfc_pkts_bytes		reset;
+};
+
+struct sfc_mae_counters_xstats {
+	uint64_t			not_inuse_update;
+	uint64_t			realloc_update;
+};
+
+struct sfc_mae_counters {
+	/** An array of all MAE counters */
+	struct sfc_mae_counter		*mae_counters;
+	/** Extra statistics for counters */
+	struct sfc_mae_counters_xstats	xstats;
+	/** Count of all MAE counters */
+	unsigned int			n_mae_counters;
+};
+
+struct sfc_mae_counter_registry {
+	/* Common counter information */
+	/** Counters collection */
+	struct sfc_mae_counters		counters;
+
+	/* Information used by counter update service */
+	/** Callback to get packets from RxQ */
+	eth_rx_burst_t			rx_pkt_burst;
+	/** Data for the callback to get packets */
+	struct sfc_dp_rxq		*rx_dp;
+	/** Number of buffers pushed to the RxQ */
+	unsigned int			pushed_n_buffers;
+	/** Are credits used by counter stream */
+	bool				use_credits;
+
+	/* Information used by configuration routines */
+	/** Counter service core ID */
+	uint32_t			service_core_id;
+	/** Counter service ID */
+	uint32_t			service_id;
+};
+
 struct sfc_mae {
 	/** Assigned switch domain identifier */
 	uint16_t			switch_domain_id;
@@ -104,6 +160,10 @@ struct sfc_mae {
 	struct sfc_mae_action_sets	action_sets;
 	/** Encap. header bounce buffer */
 	struct sfc_mae_bounce_eh	bounce_eh;
+	/** Flag indicating whether counter-only RxQ is running */
+	bool				counter_rxq_running;
+	/** Counter registry */
+	struct sfc_mae_counter_registry	counter_registry;
 };
 
 struct sfc_adapter;
@@ -130,12 +190,14 @@ struct sfc_mae_pattern_data {
 	 *
 	 * - If an item ETH is followed by a single item VLAN,
 	 *   the former must have "type" set to one of supported
-	 *   TPID values (0x8100, 0x88a8, 0x9100, 0x9200, 0x9300).
+	 *   TPID values (0x8100, 0x88a8, 0x9100, 0x9200, 0x9300),
+	 *   or 0x0000/0x0000.
 	 *
 	 * - If an item ETH is followed by two items VLAN, the
 	 *   item ETH must have "type" set to one of supported TPID
-	 *   values (0x88a8, 0x9100, 0x9200, 0x9300), and the outermost
-	 *   VLAN item must have "inner_type" set to TPID value 0x8100.
+	 *   values (0x88a8, 0x9100, 0x9200, 0x9300), or 0x0000/0x0000,
+	 *   and the outermost VLAN item must have "inner_type" set
+	 *   to TPID value 0x8100, or 0x0000/0x0000
 	 *
 	 * - If a L2 item is followed by a L3 one, the former must
 	 *   indicate "type" ("inner_type") which corresponds to
@@ -156,6 +218,9 @@ struct sfc_mae_pattern_data {
 	 * VLAN	(L3 EtherType)	--> ETHER_TYPE_BE
 	 */
 	struct sfc_mae_ethertype	ethertypes[SFC_MAE_L2_MAX_NITEMS];
+
+	rte_be16_t			tci_masks[SFC_MAE_MATCH_VLAN_MAX_NTAGS];
+
 	unsigned int			nb_vlan_tags;
 
 	/**
@@ -191,6 +256,14 @@ struct sfc_mae_pattern_data {
 	 */
 	uint8_t				l3_next_proto_restriction_value;
 	uint8_t				l3_next_proto_restriction_mask;
+
+	/* Projected state of EFX_MAE_FIELD_HAS_OVLAN match bit */
+	bool				has_ovlan_value;
+	bool				has_ovlan_mask;
+
+	/* Projected state of EFX_MAE_FIELD_HAS_IVLAN match bit */
+	bool				has_ivlan_value;
+	bool				has_ivlan_mask;
 };
 
 struct sfc_mae_parse_ctx {
@@ -231,6 +304,7 @@ int sfc_mae_rule_parse_actions(struct sfc_adapter *sa,
 sfc_flow_verify_cb_t sfc_mae_flow_verify;
 sfc_flow_insert_cb_t sfc_mae_flow_insert;
 sfc_flow_remove_cb_t sfc_mae_flow_remove;
+sfc_flow_query_cb_t sfc_mae_flow_query;
 
 #ifdef __cplusplus
 }

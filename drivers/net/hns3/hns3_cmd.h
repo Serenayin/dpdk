@@ -162,6 +162,9 @@ enum hns3_opcode_type {
 	HNS3_OPC_TM_INTERNAL_CNT        = 0x0851,
 	HNS3_OPC_TM_INTERNAL_STS_1      = 0x0852,
 
+	HNS3_OPC_TM_PORT_LIMIT_RATE     = 0x0870,
+	HNS3_OPC_TM_TC_LIMIT_RATE       = 0x0871,
+
 	/* Mailbox cmd */
 	HNS3_OPC_MBX_VF_TO_PF           = 0x2001,
 
@@ -319,6 +322,16 @@ enum HNS3_CAPS_BITS {
 	HNS3_CAPS_UDP_TUNNEL_CSUM_B,
 	HNS3_CAPS_RAS_IMP_B,
 	HNS3_CAPS_RXD_ADV_LAYOUT_B = 15,
+	HNS3_CAPS_TM_B = 17,
+};
+
+/* Capabilities of VF dependent on the PF */
+enum HNS3VF_CAPS_BITS {
+	/*
+	 * The following capability index definitions must be the same as those
+	 * in kernel side PF.
+	 */
+	HNS3VF_CAPS_VLAN_FLT_MOD_B = 0,
 };
 
 enum HNS3_API_CAP_BITS {

@@ -278,14 +278,28 @@ struct ready_msg_rsp {
 	uint16_t __io rclk_freq; /* RCLK frequency */
 };
 
+enum npc_pkind_type {
+	NPC_RX_VLAN_EXDSA_PKIND = 56ULL,
+	NPC_RX_CHLEN24B_PKIND,
+	NPC_RX_CPT_HDR_PKIND,
+	NPC_RX_CHLEN90B_PKIND,
+	NPC_TX_HIGIG_PKIND,
+	NPC_RX_HIGIG_PKIND,
+	NPC_RX_EXDSA_PKIND,
+	NPC_RX_EDSA_PKIND,
+	NPC_TX_DEF_PKIND,
+};
+
 /* Struct to set pkind */
 struct npc_set_pkind {
 	struct mbox_msghdr hdr;
-#define ROC_PRIV_FLAGS_DEFAULT BIT_ULL(0)
-#define ROC_PRIV_FLAGS_EDSA    BIT_ULL(1)
-#define ROC_PRIV_FLAGS_HIGIG   BIT_ULL(2)
-#define ROC_PRIV_FLAGS_LEN_90B BIT_ULL(3)
-#define ROC_PRIV_FLAGS_CUSTOM  BIT_ULL(63)
+#define ROC_PRIV_FLAGS_DEFAULT	  BIT_ULL(0)
+#define ROC_PRIV_FLAGS_EDSA	  BIT_ULL(1)
+#define ROC_PRIV_FLAGS_HIGIG	  BIT_ULL(2)
+#define ROC_PRIV_FLAGS_LEN_90B	  BIT_ULL(3)
+#define ROC_PRIV_FLAGS_EXDSA	  BIT_ULL(4)
+#define ROC_PRIV_FLAGS_VLAN_EXDSA BIT_ULL(5)
+#define ROC_PRIV_FLAGS_CUSTOM	  BIT_ULL(63)
 	uint64_t __io mode;
 #define PKIND_TX BIT_ULL(0)
 #define PKIND_RX BIT_ULL(1)
@@ -403,6 +417,9 @@ struct lmtst_tbl_setup_req {
 	uint64_t __io dis_line_pref : 1;
 	uint64_t __io ssow_pf_func : 13;
 	uint16_t __io pcifunc;
+	uint8_t __io use_local_lmt_region;
+	uint64_t __io lmt_iova;
+	uint64_t __io rsvd[2]; /* Future use */
 };
 
 /* CGX mbox message formats */
@@ -1328,6 +1345,9 @@ struct cpt_rxc_time_cfg_req {
 struct cpt_rx_inline_lf_cfg_msg {
 	struct mbox_msghdr hdr;
 	uint16_t __io sso_pf_func;
+	uint16_t __io param1;
+	uint16_t __io param2;
+	uint16_t __io reserved;
 };
 
 enum cpt_eng_type {
