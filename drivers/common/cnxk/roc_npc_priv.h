@@ -5,10 +5,11 @@
 #ifndef _ROC_NPC_PRIV_H_
 #define _ROC_NPC_PRIV_H_
 
-#define NPC_IH_LENGTH	  8
-#define NPC_TPID_LENGTH	  2
-#define NPC_HIGIG2_LENGTH 16
-#define NPC_COUNTER_NONE  (-1)
+#define NPC_IH_LENGTH	     8
+#define NPC_TPID_LENGTH	     2
+#define NPC_HIGIG2_LENGTH    16
+#define NPC_MAX_RAW_ITEM_LEN 16
+#define NPC_COUNTER_NONE     (-1)
 
 #define NPC_RSS_GRPS 8
 
@@ -47,7 +48,7 @@
 #define NPC_RVUPF_MAX_9XXX 0x10 /* HRM: RVU_PRIV_CONST */
 #define NPC_RVUPF_MAX_10XX 0x20 /* HRM: RVU_PRIV_CONST */
 #define NPC_NIXLF_MAX	   0x80 /* HRM: NIX_AF_CONST2 */
-#define NPC_MCAME_PER_PF   2	/* DRV: RSVD_MCAM_ENTRIES_PER_PF */
+#define NPC_MCAME_PER_PF   3	/* DRV: RSVD_MCAM_ENTRIES_PER_PF */
 #define NPC_MCAME_PER_LF   1	/* DRV: RSVD_MCAM_ENTRIES_PER_NIXLF */
 #define NPC_MCAME_RESVD_9XXX                                                   \
 	(NPC_NIXLF_MAX * NPC_MCAME_PER_LF +                                    \
@@ -350,6 +351,7 @@ struct npc {
 	uint16_t flow_max_priority;		/* Max priority for flow */
 	uint16_t switch_header_type; /* Suppprted switch header type */
 	uint32_t mark_actions;	     /* Number of mark actions */
+	uint32_t vtag_actions;	     /* vtag insert/strip actions */
 	uint16_t pf_func;	     /* pf_func of device */
 	npc_dxcfg_t prx_dxcfg;	     /* intf, lid, lt, extract */
 	npc_fxcfg_t prx_fxcfg;	     /* Flag extract */

@@ -164,6 +164,7 @@ struct vhost_virtqueue {
 
 	uint16_t		batch_copy_nb_elems;
 	struct batch_copy_elem	*batch_copy_elems;
+	int			numa_node;
 	bool			used_wrap_counter;
 	bool			avail_wrap_counter;
 
@@ -217,9 +218,8 @@ struct vhost_virtqueue {
 	};
 
 	/* vq async features */
-	bool		async_inorder;
 	bool		async_registered;
-	uint16_t	async_threshold;
+	uint32_t	async_threshold;
 
 	int			notif_enable;
 #define VIRTIO_UNINITIALIZED_NOTIF	(-1)

@@ -36,6 +36,7 @@ enum roc_npc_item_type {
 	ROC_NPC_ITEM_TYPE_CPT_HDR,
 	ROC_NPC_ITEM_TYPE_L3_CUSTOM,
 	ROC_NPC_ITEM_TYPE_QINQ,
+	ROC_NPC_ITEM_TYPE_RAW,
 	ROC_NPC_ITEM_TYPE_END,
 };
 
@@ -45,6 +46,16 @@ struct roc_npc_item_info {
 	const void *spec; /**< Pointer to item specification structure. */
 	const void *mask; /**< Bit-mask applied to spec and last. */
 	const void *last; /* For range */
+};
+
+struct roc_npc_flow_item_raw {
+	uint32_t relative : 1; /**< Look for pattern after the previous item. */
+	uint32_t search : 1;   /**< Search pattern from offset. */
+	uint32_t reserved : 30; /**< Reserved, must be set to zero. */
+	int32_t offset;		/**< Absolute or relative offset for pattern. */
+	uint16_t limit;		/**< Search area limit for start of pattern. */
+	uint16_t length;	/**< Pattern length. */
+	const uint8_t *pattern; /**< Byte string to look for. */
 };
 
 #define ROC_NPC_MAX_ACTION_COUNT 12
@@ -62,6 +73,10 @@ enum roc_npc_action_type {
 	ROC_NPC_ACTION_TYPE_COUNT = (1 << 9),
 	ROC_NPC_ACTION_TYPE_PF = (1 << 10),
 	ROC_NPC_ACTION_TYPE_VF = (1 << 11),
+	ROC_NPC_ACTION_TYPE_VLAN_STRIP = (1 << 12),
+	ROC_NPC_ACTION_TYPE_VLAN_INSERT = (1 << 13),
+	ROC_NPC_ACTION_TYPE_VLAN_ETHTYPE_INSERT = (1 << 14),
+	ROC_NPC_ACTION_TYPE_VLAN_PCP_INSERT = (1 << 15),
 };
 
 struct roc_npc_action {
@@ -83,11 +98,28 @@ struct roc_npc_action_queue {
 	uint16_t index; /**< Queue index to use. */
 };
 
+struct roc_npc_action_of_push_vlan {
+	uint16_t ethertype; /**< EtherType. */
+};
+
+struct roc_npc_action_of_set_vlan_vid {
+	uint16_t vlan_vid; /**< VLAN id. */
+};
+
+struct roc_npc_action_of_set_vlan_pcp {
+	uint8_t vlan_pcp; /**< VLAN priority. */
+};
+
 struct roc_npc_attr {
 	uint32_t priority;	/**< Rule priority level within group. */
 	uint32_t ingress : 1;	/**< Rule applies to ingress traffic. */
 	uint32_t egress : 1;	/**< Rule applies to egress traffic. */
 	uint32_t reserved : 30; /**< Reserved, must be zero. */
+};
+
+struct roc_npc_flow_dump_data {
+	uint8_t lid;
+	uint16_t ltype;
 };
 
 struct roc_npc_flow {
@@ -102,6 +134,10 @@ struct roc_npc_flow {
 	uint64_t mcam_mask[ROC_NPC_MAX_MCAM_WIDTH_DWORDS];
 	uint64_t npc_action;
 	uint64_t vtag_action;
+	bool vtag_insert_enabled;
+#define ROC_NPC_MAX_FLOW_PATTERNS 32
+	struct roc_npc_flow_dump_data dump_data[ROC_NPC_MAX_FLOW_PATTERNS];
+	uint16_t num_patterns;
 
 	TAILQ_ENTRY(roc_npc_flow) next;
 };
@@ -129,6 +165,10 @@ enum roc_npc_intf {
 	ROC_NPC_INTF_TX = 1,
 	ROC_NPC_INTF_MAX = 2,
 };
+
+enum flow_vtag_cfg_dir { VTAG_TX, VTAG_RX };
+#define ROC_ETHER_TYPE_VLAN 0x8100 /**< IEEE 802.1Q VLAN tagging. */
+#define ROC_ETHER_TYPE_QINQ 0x88A8 /**< IEEE 802.1ad QinQ tagging. */
 
 struct roc_npc {
 	struct roc_nix *roc_nix;
@@ -185,5 +225,13 @@ int __roc_api roc_npc_mcam_clear_counter(struct roc_npc *roc_npc,
 					 uint32_t ctr_id);
 
 int __roc_api roc_npc_mcam_free_all_resources(struct roc_npc *roc_npc);
-
+void __roc_api roc_npc_flow_dump(FILE *file, struct roc_npc *roc_npc);
+void __roc_api roc_npc_flow_mcam_dump(FILE *file, struct roc_npc *roc_npc,
+				      struct roc_npc_flow *mcam);
+int __roc_api roc_npc_mark_actions_get(struct roc_npc *roc_npc);
+int __roc_api roc_npc_mark_actions_sub_return(struct roc_npc *roc_npc,
+					      uint32_t count);
+int __roc_api roc_npc_vtag_actions_get(struct roc_npc *roc_npc);
+int __roc_api roc_npc_vtag_actions_sub_return(struct roc_npc *roc_npc,
+					      uint32_t count);
 #endif /* _ROC_NPC_H_ */

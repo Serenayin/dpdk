@@ -1213,7 +1213,6 @@ i40evf_check_vf_reset_done(struct rte_eth_dev *dev)
 	if (i >= MAX_RESET_WAIT_CNT)
 		return -1;
 
-	vf->vf_reset = false;
 	vf->pend_msg &= ~PFMSG_RESET_IMPENDING;
 
 	return 0;
@@ -1392,6 +1391,7 @@ i40evf_handle_pf_event(struct rte_eth_dev *dev, uint8_t *msg,
 	switch (pf_msg->event) {
 	case VIRTCHNL_EVENT_RESET_IMPENDING:
 		PMD_DRV_LOG(DEBUG, "VIRTCHNL_EVENT_RESET_IMPENDING event");
+		vf->vf_reset = true;
 		rte_eth_dev_callback_process(dev,
 				RTE_ETH_EVENT_INTR_RESET, NULL);
 		break;
@@ -1660,7 +1660,6 @@ static int
 i40evf_driver_selected(struct rte_devargs *devargs)
 {
 	struct rte_kvargs *kvlist;
-	const char *key = "driver";
 	int ret = 0;
 
 	if (devargs == NULL)
@@ -1670,13 +1669,13 @@ i40evf_driver_selected(struct rte_devargs *devargs)
 	if (kvlist == NULL)
 		return 0;
 
-	if (!rte_kvargs_count(kvlist, key))
+	if (!rte_kvargs_count(kvlist, RTE_DEVARGS_KEY_DRIVER))
 		goto exit;
 
 	/* i40evf driver selected when there's a key-value pair:
 	 * driver=i40evf
 	 */
-	if (rte_kvargs_process(kvlist, key,
+	if (rte_kvargs_process(kvlist, RTE_DEVARGS_KEY_DRIVER,
 			       i40evf_check_driver_handler, NULL) < 0)
 		goto exit;
 
@@ -2468,6 +2467,7 @@ i40evf_dev_close(struct rte_eth_dev *dev)
 {
 	struct i40e_hw *hw = I40E_DEV_PRIVATE_TO_HW(dev->data->dev_private);
 	struct i40e_vf *vf = I40EVF_DEV_PRIVATE_TO_VF(dev->data->dev_private);
+	struct rte_pci_device *pci_dev = RTE_ETH_DEV_TO_PCI(dev);
 	int ret;
 
 	if (rte_eal_process_type() != RTE_PROC_PRIMARY)
@@ -2489,6 +2489,16 @@ i40evf_dev_close(struct rte_eth_dev *dev)
 	i40evf_reset_vf(dev);
 	i40e_shutdown_adminq(hw);
 	i40evf_disable_irq0(hw);
+
+	/*
+	 * If the VF is reset via VFLR, the device will be knocked out of bus
+	 * master mode, and the driver will fail to recover from the reset. Fix
+	 * this by enabling bus mastering after every reset. In a non-VFLR case,
+	 * the bus master bit will not be disabled, and this call will have no
+	 * effect.
+	 */
+	if (vf->vf_reset && !rte_pci_set_bus_master(pci_dev, true))
+		vf->vf_reset = false;
 
 	rte_free(vf->vf_res);
 	vf->vf_res = NULL;

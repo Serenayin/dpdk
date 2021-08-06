@@ -17,18 +17,33 @@ Deprecation Notices
 * eal: The function ``rte_eal_remote_launch`` will return new error codes
   after read or write error on the pipe, instead of calling ``rte_panic``.
 
+* eal: Making ``struct rte_intr_handle`` internal to avoid any ABI breakages
+  in future.
+
 * rte_atomicNN_xxx: These APIs do not take memory order parameter. This does
   not allow for writing optimized code for all the CPU architectures supported
-  in DPDK. DPDK will adopt C11 atomic operations semantics and provide wrappers
-  using C11 atomic built-ins. These wrappers must be used for patches that
-  need to be merged in 20.08 onwards. This change will not introduce any
-  performance degradation.
+  in DPDK. DPDK has adopted the atomic operations from
+  https://gcc.gnu.org/onlinedocs/gcc/_005f_005fatomic-Builtins.html. These
+  operations must be used for patches that need to be merged in 20.08 onwards.
+  This change will not introduce any performance degradation.
 
 * rte_smp_*mb: These APIs provide full barrier functionality. However, many
-  use cases do not require full barriers. To support such use cases, DPDK will
-  adopt C11 barrier semantics and provide wrappers using C11 atomic built-ins.
-  These wrappers must be used for patches that need to be merged in 20.08
-  onwards. This change will not introduce any performance degradation.
+  use cases do not require full barriers. To support such use cases, DPDK has
+  adopted atomic operations from
+  https://gcc.gnu.org/onlinedocs/gcc/_005f_005fatomic-Builtins.html. These
+  operations and a new wrapper ``rte_atomic_thread_fence`` instead of
+  ``__atomic_thread_fence`` must be used for patches that need to be merged in
+  20.08 onwards. This change will not introduce any performance degradation.
+
+* mbuf: The mbuf offload flags ``PKT_*`` will be renamed as ``RTE_MBUF_F_*``.
+  A compatibility layer will be kept until DPDK 22.11, except for the flags
+  that are already deprecated (``PKT_RX_L4_CKSUM_BAD``, ``PKT_RX_IP_CKSUM_BAD``,
+  ``PKT_RX_EIP_CKSUM_BAD``, ``PKT_TX_QINQ_PKT``) which will be removed.
+
+* pci: To reduce unnecessary ABIs exposed by DPDK bus driver, "rte_bus_pci.h"
+  will be made internal in 21.11 and macros/data structures/functions defined
+  in the header will not be considered as ABI anymore. This change is inspired
+  by the RFC https://patchwork.dpdk.org/project/dpdk/list/?series=17176.
 
 * lib: will fix extending some enum/define breaking the ABI. There are multiple
   samples in DPDK that enum/define terminated with a ``.*MAX.*`` value which is
@@ -43,6 +58,12 @@ Deprecation Notices
   Need to identify this kind of usages and fix in 20.11, otherwise this blocks
   us extending existing enum/define.
   One solution can be using a fixed size array instead of ``.*MAX.*`` value.
+
+* ethdev: Will add ``RTE_ETH_`` prefix to all ethdev macros/enums in v21.11.
+  Macros will be added for backward compatibility.
+  Backward compatibility macros will be removed on v22.11.
+  A few old backward compatibility macros from 2013 that does not have
+  proper prefix will be removed on v21.11.
 
 * ethdev: The flow director API, including ``rte_eth_conf.fdir_conf`` field,
   and the related structures (``rte_fdir_*`` and ``rte_eth_fdir_*``),
@@ -126,6 +147,39 @@ Deprecation Notices
   can still be used if users specify the devarg "driver=i40evf". I40evf will
   be deleted in DPDK 21.11.
 
+* net: ``s_addr`` and ``d_addr`` fields of ``rte_ether_hdr`` structure
+  will be renamed in DPDK 21.11 to avoid conflict with Windows Sockets headers.
+
+* net: The structure ``rte_ipv4_hdr`` will have two unions.
+  The first union is for existing ``version_ihl`` byte
+  and new bitfield for version and IHL.
+  The second union is for existing ``fragment_offset``
+  and new bitfield for fragment flags and offset.
+
+* compressdev: ``min`` and ``max`` fields of ``rte_param_log2_range`` structure
+  will be renamed in DPDK 21.11 to avoid conflict with Windows Sockets headers.
+
+* cryptodev: ``min`` and ``max`` fields of ``rte_crypto_param_range`` structure
+  will be renamed in DPDK 21.11 to avoid conflict with Windows Sockets headers.
+
+* cryptodev: The field ``dataunit_len`` of the ``struct rte_crypto_cipher_xform``
+  has a limited size ``uint16_t``.
+  It will be moved and extended as ``uint32_t`` in DPDK 21.11.
+
+* cryptodev: The interface between library and drivers will be marked
+  as internal in DPDK 21.11.
+
+* eventdev: The file ``rte_eventdev_pmd.h`` will be renamed to ``eventdev_driver.h``
+  to make the driver interface as internal and the structures ``rte_eventdev_data``,
+  ``rte_eventdev`` and ``rte_eventdevs`` will be moved to a new file named
+  ``rte_eventdev_core.h`` in DPDK 21.11.
+  The ``rte_`` prefix for internal structures and functions will be removed across the
+  library.
+  The experimental eventdev trace APIs and ``rte_event_vector_pool_create``,
+  ``rte_event_eth_rx_adapter_vector_limits_get`` will be promoted to stable.
+  An 8-byte reserved field will be added to the structure ``rte_event_timer`` to
+  support future extensions.
+
 * eventdev: The structure ``rte_event_eth_rx_adapter_queue_conf`` will be
   extended to include ``rte_event_eth_rx_adapter_event_vector_config`` elements
   and the function ``rte_event_eth_rx_adapter_queue_event_vector_config`` will
@@ -135,15 +189,18 @@ Deprecation Notices
   values to the function ``rte_event_eth_rx_adapter_queue_add`` using
   the structure ``rte_event_eth_rx_adapter_queue_add``.
 
-* sched: To allow more traffic classes, flexible mapping of pipe queues to
-  traffic classes, and subport level configuration of pipes and queues
-  changes will be made to macros, data structures and API functions defined
-  in "rte_sched.h". These changes are aligned to improvements suggested in the
-  RFC https://mails.dpdk.org/archives/dev/2018-November/120035.html.
-
 * metrics: The function ``rte_metrics_init`` will have a non-void return
   in order to notify errors instead of calling ``rte_exit``.
 
 * cmdline: ``cmdline`` structure will be made opaque to hide platform-specific
   content. On Linux and FreeBSD, supported prior to DPDK 20.11,
   original structure will be kept until DPDK 21.11.
+
+* security: The functions ``rte_security_set_pkt_metadata`` and
+  ``rte_security_get_userdata`` will be made inline functions and additional
+  flags will be added in structure ``rte_security_ctx`` in DPDK 21.11.
+
+* cryptodev: The structure ``rte_crypto_op`` would be updated to reduce
+  reserved bytes to 2 (from 3), and use 1 byte to indicate warnings and other
+  information from the crypto/security operation. This field will be used to
+  communicate events such as soft expiry with IPsec in lookaside mode.

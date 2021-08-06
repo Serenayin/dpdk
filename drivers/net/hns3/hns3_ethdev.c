@@ -253,8 +253,8 @@ static void
 hns3_clear_all_event_cause(struct hns3_hw *hw)
 {
 	uint32_t vector0_int_stats;
-	vector0_int_stats = hns3_read_dev(hw, HNS3_VECTOR0_OTHER_INT_STS_REG);
 
+	vector0_int_stats = hns3_read_dev(hw, HNS3_VECTOR0_OTHER_INT_STS_REG);
 	if (BIT(HNS3_VECTOR0_IMPRESET_INT_B) & vector0_int_stats)
 		hns3_warn(hw, "Probe during IMP reset interrupt");
 
@@ -317,6 +317,7 @@ hns3_interrupt_handler(void *param)
 	vector0_int = hns3_read_dev(hw, HNS3_VECTOR0_OTHER_INT_STS_REG);
 	ras_int = hns3_read_dev(hw, HNS3_RAS_PF_OTHER_INT_STS_REG);
 	cmdq_int = hns3_read_dev(hw, HNS3_VECTOR0_CMDQ_SRC_REG);
+	hns3_clear_event_cause(hw, event_cause, clearval);
 	/* vector 0 interrupt is shared with reset and mailbox source events. */
 	if (event_cause == HNS3_VECTOR0_EVENT_ERR) {
 		hns3_warn(hw, "received interrupt: vector0_int_stat:0x%x "
@@ -335,7 +336,6 @@ hns3_interrupt_handler(void *param)
 			  vector0_int, ras_int, cmdq_int);
 	}
 
-	hns3_clear_event_cause(hw, event_cause, clearval);
 	/* Enable interrupt if it is not cause by reset */
 	hns3_pf_enable_irq0(hw);
 }
@@ -640,7 +640,8 @@ hns3_en_hw_strip_rxvtag(struct hns3_adapter *hns, bool enable)
 
 	ret = hns3_set_vlan_rx_offload_cfg(hns, &rxvlan_cfg);
 	if (ret) {
-		hns3_err(hw, "enable strip rx vtag failed, ret =%d", ret);
+		hns3_err(hw, "%s strip rx vtag failed, ret = %d.",
+				enable ? "enable" : "disable", ret);
 		return ret;
 	}
 
@@ -1747,7 +1748,6 @@ hns3_set_default_mac_addr(struct rte_eth_dev *dev,
 	struct rte_ether_addr *oaddr;
 	char mac_str[RTE_ETHER_ADDR_FMT_SIZE];
 	bool default_addr_setted;
-	bool rm_succes = false;
 	int ret, ret_val;
 
 	/*
@@ -1767,9 +1767,10 @@ hns3_set_default_mac_addr(struct rte_eth_dev *dev,
 					      oaddr);
 			hns3_warn(hw, "Remove old uc mac address(%s) fail: %d",
 				  mac_str, ret);
-			rm_succes = false;
-		} else
-			rm_succes = true;
+
+			rte_spinlock_unlock(&hw->lock);
+			return ret;
+		}
 	}
 
 	ret = hns3_add_uc_addr_common(hw, mac_addr);
@@ -1804,16 +1805,12 @@ err_pause_addr_cfg:
 	}
 
 err_add_uc_addr:
-	if (rm_succes) {
-		ret_val = hns3_add_uc_addr_common(hw, oaddr);
-		if (ret_val) {
-			hns3_ether_format_addr(mac_str, RTE_ETHER_ADDR_FMT_SIZE,
-					      oaddr);
-			hns3_warn(hw,
-				  "Failed to restore old uc mac addr(%s): %d",
+	ret_val = hns3_add_uc_addr_common(hw, oaddr);
+	if (ret_val) {
+		hns3_ether_format_addr(mac_str, RTE_ETHER_ADDR_FMT_SIZE, oaddr);
+		hns3_warn(hw, "Failed to restore old uc mac addr(%s): %d",
 				  mac_str, ret_val);
-			hw->mac.default_addr_setted = false;
-		}
+		hw->mac.default_addr_setted = false;
 	}
 	rte_spinlock_unlock(&hw->lock);
 
@@ -2440,14 +2437,11 @@ hns3_check_link_speed(struct hns3_hw *hw, uint32_t link_speeds)
 	/*
 	 * Some hardware doesn't support auto-negotiation, but users may not
 	 * configure link_speeds (default 0), which means auto-negotiation.
-	 * In this case, a warning message need to be printed, instead of
-	 * an error.
+	 * In this case, it should return success.
 	 */
 	if (link_speeds == ETH_LINK_SPEED_AUTONEG &&
-	    hw->mac.support_autoneg == 0) {
-		hns3_warn(hw, "auto-negotiation is not supported, use default fixed speed!");
+	    hw->mac.support_autoneg == 0)
 		return 0;
-	}
 
 	if (link_speeds != ETH_LINK_SPEED_AUTONEG) {
 		ret = hns3_check_port_speed(hw, link_speeds);
@@ -2497,13 +2491,11 @@ hns3_dev_configure(struct rte_eth_dev *dev)
 	 * work as usual. But these fake queues are imperceptible, and can not
 	 * be used by upper applications.
 	 */
-	if (!hns3_dev_indep_txrx_supported(hw)) {
-		ret = hns3_set_fake_rx_or_tx_queues(dev, nb_rx_q, nb_tx_q);
-		if (ret) {
-			hns3_err(hw, "fail to set Rx/Tx fake queues, ret = %d.",
-				 ret);
-			return ret;
-		}
+	ret = hns3_set_fake_rx_or_tx_queues(dev, nb_rx_q, nb_tx_q);
+	if (ret) {
+		hns3_err(hw, "fail to set Rx/Tx fake queues, ret = %d.", ret);
+		hw->cfg_max_queues = 0;
+		return ret;
 	}
 
 	hw->adapter_state = HNS3_NIC_CONFIGURING;
@@ -2551,6 +2543,7 @@ hns3_dev_configure(struct rte_eth_dev *dev)
 	return 0;
 
 cfg_err:
+	hw->cfg_max_queues = 0;
 	(void)hns3_set_fake_rx_or_tx_queues(dev, 0, 0);
 	hw->adapter_state = HNS3_NIC_INITIALIZED;
 
@@ -3127,7 +3120,6 @@ hns3_parse_cfg(struct hns3_cfg *cfg, struct hns3_cmd_desc *desc)
 	ext_rss_size_max = hns3_get_field(rte_le_to_cpu_32(req->param[2]),
 					       HNS3_CFG_EXT_RSS_SIZE_M,
 					       HNS3_CFG_EXT_RSS_SIZE_S);
-
 	/*
 	 * Field ext_rss_size_max obtained from firmware will be more flexible
 	 * for future changes and expansions, which is an exponent of 2, instead
@@ -3318,6 +3310,7 @@ hns3_get_capability(struct hns3_hw *hw)
 		pf->tqp_config_mode = HNS3_FIXED_MAX_TQP_NUM_MODE;
 		hw->rss_info.ipv6_sctp_offload_supported = false;
 		hw->udp_cksum_mode = HNS3_SPECIAL_PORT_SW_CKSUM_MODE;
+		pf->support_multi_tc_pause = false;
 		return 0;
 	}
 
@@ -3338,6 +3331,7 @@ hns3_get_capability(struct hns3_hw *hw)
 	pf->tqp_config_mode = HNS3_FLEX_MAX_TQP_NUM_MODE;
 	hw->rss_info.ipv6_sctp_offload_supported = true;
 	hw->udp_cksum_mode = HNS3_SPECIAL_PORT_HW_CKSUM_MODE;
+	pf->support_multi_tc_pause = true;
 
 	return 0;
 }
@@ -3846,7 +3840,6 @@ hns3_drop_nopfc_buf_till_fit(struct hns3_hw *hw,
 	for (i = HNS3_MAX_TC_NUM - 1; i >= 0; i--) {
 		priv = &buf_alloc->priv_buf[i];
 		mask = BIT((uint8_t)i);
-
 		if (hw->hw_tc_map & mask &&
 		    !(hw->dcb_info.hw_pfc_map & mask)) {
 			/* Clear the no pfc TC private buffer */
@@ -3932,7 +3925,6 @@ hns3_only_alloc_priv_buff(struct hns3_hw *hw,
 			COMPENSATE_HALF_MPS_NUM * half_mps;
 	min_rx_priv = roundup(min_rx_priv, HNS3_BUF_SIZE_UNIT);
 	rx_priv = rounddown(rx_priv, HNS3_BUF_SIZE_UNIT);
-
 	if (rx_priv < min_rx_priv)
 		return false;
 
@@ -5177,6 +5169,8 @@ hns3_init_pf(struct rte_eth_dev *eth_dev)
 		goto err_cmd_init;
 	}
 
+	hns3_tx_push_init(eth_dev);
+
 	/*
 	 * To ensure that the hardware environment is clean during
 	 * initialization, the driver actively clear the hardware environment
@@ -5298,6 +5292,7 @@ hns3_uninit_pf(struct rte_eth_dev *eth_dev)
 	hns3_rss_uninit(hns);
 	(void)hns3_config_gro(hw, false);
 	hns3_promisc_uninit(hw);
+	hns3_flow_uninit(eth_dev);
 	hns3_fdir_filter_uninit(hns);
 	hns3_uninit_umv_space(hw);
 	hns3_tqp_stats_uninit(hw);
@@ -5518,10 +5513,13 @@ hns3_set_fiber_port_link_speed(struct hns3_hw *hw,
 	/*
 	 * Some hardware doesn't support auto-negotiation, but users may not
 	 * configure link_speeds (default 0), which means auto-negotiation.
-	 * In this case, it should return success.
+	 * In this case, a warning message need to be printed, instead of
+	 * an error.
 	 */
-	if (cfg->autoneg)
+	if (cfg->autoneg) {
+		hns3_warn(hw, "auto-negotiation is not supported, use default fixed speed!");
 		return 0;
+	}
 
 	return hns3_cfg_mac_speed_dup(hw, cfg->speed, cfg->duplex);
 }
@@ -5895,7 +5893,7 @@ hns3_dev_stop(struct rte_eth_dev *dev)
 	/* Disable datapath on secondary process. */
 	hns3_mp_req_stop_rxtx(dev);
 	/* Prevent crashes when queues are still in use. */
-	rte_delay_ms(hw->tqps_num);
+	rte_delay_ms(hw->cfg_max_queues);
 
 	rte_spinlock_lock(&hw->lock);
 	if (__atomic_load_n(&hw->reset.resetting, __ATOMIC_RELAXED) == 0) {
@@ -5921,11 +5919,8 @@ hns3_dev_close(struct rte_eth_dev *eth_dev)
 	struct hns3_hw *hw = &hns->hw;
 	int ret = 0;
 
-	if (rte_eal_process_type() != RTE_PROC_PRIMARY) {
-		rte_free(eth_dev->process_private);
-		eth_dev->process_private = NULL;
+	if (rte_eal_process_type() != RTE_PROC_PRIMARY)
 		return 0;
-	}
 
 	if (hw->adapter_state == HNS3_NIC_STARTED)
 		ret = hns3_dev_stop(eth_dev);
@@ -5940,8 +5935,6 @@ hns3_dev_close(struct rte_eth_dev *eth_dev)
 	hns3_uninit_pf(eth_dev);
 	hns3_free_all_queues(eth_dev);
 	rte_free(hw->reset.wait_data);
-	rte_free(eth_dev->process_private);
-	eth_dev->process_private = NULL;
 	hns3_mp_uninit_primary();
 	hns3_warn(hw, "Close port %u finished", hw->data->port_id);
 
@@ -6104,6 +6097,7 @@ static int
 hns3_flow_ctrl_set(struct rte_eth_dev *dev, struct rte_eth_fc_conf *fc_conf)
 {
 	struct hns3_hw *hw = HNS3_DEV_PRIVATE_TO_HW(dev->data->dev_private);
+	struct hns3_pf *pf = HNS3_DEV_PRIVATE_TO_PF(dev->data->dev_private);
 	int ret;
 
 	if (fc_conf->high_water || fc_conf->low_water ||
@@ -6133,7 +6127,7 @@ hns3_flow_ctrl_set(struct rte_eth_dev *dev, struct rte_eth_fc_conf *fc_conf)
 		return -EOPNOTSUPP;
 	}
 
-	if (hw->num_tc > 1) {
+	if (hw->num_tc > 1 && !pf->support_multi_tc_pause) {
 		hns3_err(hw, "in multi-TC scenarios, MAC pause is not supported.");
 		return -EOPNOTSUPP;
 	}
@@ -6297,7 +6291,6 @@ hns3_is_reset_pending(struct hns3_adapter *hns)
 
 	hns3_check_event_cause(hns, NULL);
 	reset = hns3_get_reset_level(hns, &hw->reset.pending);
-
 	if (reset != HNS3_NONE_RESET && hw->reset.level != HNS3_NONE_RESET &&
 	    hw->reset.level < reset) {
 		hns3_warn(hw, "High level reset %d is pending", reset);
@@ -6511,7 +6504,7 @@ hns3_stop_service(struct hns3_adapter *hns)
 	rte_wmb();
 	/* Disable datapath on secondary process. */
 	hns3_mp_req_stop_rxtx(eth_dev);
-	rte_delay_ms(hw->tqps_num);
+	rte_delay_ms(hw->cfg_max_queues);
 
 	rte_spinlock_lock(&hw->lock);
 	if (hns->hw.adapter_state == HNS3_NIC_STARTED ||
@@ -7401,15 +7394,6 @@ hns3_dev_init(struct rte_eth_dev *eth_dev)
 
 	PMD_INIT_FUNC_TRACE();
 
-	eth_dev->process_private = (struct hns3_process_private *)
-	    rte_zmalloc_socket("hns3_filter_list",
-			       sizeof(struct hns3_process_private),
-			       RTE_CACHE_LINE_SIZE, eth_dev->device->numa_node);
-	if (eth_dev->process_private == NULL) {
-		PMD_INIT_LOG(ERR, "Failed to alloc memory for process private");
-		return -ENOMEM;
-	}
-
 	hns3_flow_init(eth_dev);
 
 	hns3_set_rxtx_function(eth_dev);
@@ -7422,8 +7406,8 @@ hns3_dev_init(struct rte_eth_dev *eth_dev)
 				     "process, ret = %d", ret);
 			goto err_mp_init_secondary;
 		}
-
 		hw->secondary_cnt++;
+		hns3_tx_push_init(eth_dev);
 		return 0;
 	}
 
@@ -7513,8 +7497,6 @@ err_mp_init_secondary:
 	eth_dev->tx_pkt_burst = NULL;
 	eth_dev->tx_pkt_prepare = NULL;
 	eth_dev->tx_descriptor_status = NULL;
-	rte_free(eth_dev->process_private);
-	eth_dev->process_private = NULL;
 	return ret;
 }
 
@@ -7526,11 +7508,8 @@ hns3_dev_uninit(struct rte_eth_dev *eth_dev)
 
 	PMD_INIT_FUNC_TRACE();
 
-	if (rte_eal_process_type() != RTE_PROC_PRIMARY) {
-		rte_free(eth_dev->process_private);
-		eth_dev->process_private = NULL;
+	if (rte_eal_process_type() != RTE_PROC_PRIMARY)
 		return 0;
-	}
 
 	if (hw->adapter_state < HNS3_NIC_CLOSING)
 		hns3_dev_close(eth_dev);

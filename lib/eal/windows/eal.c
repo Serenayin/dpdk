@@ -22,6 +22,7 @@
 #include <rte_service_component.h>
 #include <rte_vfio.h>
 
+#include "eal_firmware.h"
 #include "eal_hugepages.h"
 #include "eal_trace.h"
 #include "eal_log.h"
@@ -258,6 +259,9 @@ rte_eal_cleanup(void)
 {
 	struct internal_config *internal_conf =
 		eal_get_internal_configuration();
+
+	eal_intr_thread_cancel();
+	eal_mem_virt2iova_cleanup();
 	/* after this point, any DPDK pointers will become dangling */
 	rte_eal_memory_detach();
 	eal_cleanup_config(internal_conf);
@@ -460,6 +464,14 @@ rte_vfio_container_dma_unmap(__rte_unused int container_fd,
 			__rte_unused uint64_t vaddr,
 			__rte_unused uint64_t iova,
 			__rte_unused uint64_t len)
+{
+	return -1;
+}
+
+int
+rte_firmware_read(__rte_unused const char *name,
+			__rte_unused void **buf,
+			__rte_unused size_t *bufsz)
 {
 	return -1;
 }
