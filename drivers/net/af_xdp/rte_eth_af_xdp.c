@@ -37,6 +37,7 @@
 #include <rte_malloc.h>
 #include <rte_ring.h>
 #include <rte_spinlock.h>
+#include <rte_power_intrinsics.h>
 
 #include "compat.h"
 
@@ -526,7 +527,6 @@ af_xdp_tx_zc(void *queue, struct rte_mbuf **bufs, uint16_t nb_pkts)
 
 			if (!xsk_ring_prod__reserve(&txq->tx, 1, &idx_tx)) {
 				rte_pktmbuf_free(local_mbuf);
-				kick_tx(txq, cq);
 				goto out;
 			}
 
@@ -550,10 +550,9 @@ af_xdp_tx_zc(void *queue, struct rte_mbuf **bufs, uint16_t nb_pkts)
 		tx_bytes += mbuf->pkt_len;
 	}
 
-	kick_tx(txq, cq);
-
 out:
 	xsk_ring_prod__submit(&txq->tx, count);
+	kick_tx(txq, cq);
 
 	txq->stats.tx_pkts += count;
 	txq->stats.tx_bytes += tx_bytes;
@@ -784,6 +783,38 @@ eth_dev_configure(struct rte_eth_dev *dev)
 		TAILQ_INSERT_TAIL(&internal_list, list, next);
 		pthread_mutex_unlock(&internal_list_lock);
 	}
+
+	return 0;
+}
+
+#define CLB_VAL_IDX 0
+static int
+eth_monitor_callback(const uint64_t value,
+		const uint64_t opaque[RTE_POWER_MONITOR_OPAQUE_SZ])
+{
+	const uint64_t v = opaque[CLB_VAL_IDX];
+	const uint64_t m = (uint32_t)~0;
+
+	/* if the value has changed, abort entering power optimized state */
+	return (value & m) == v ? 0 : -1;
+}
+
+static int
+eth_get_monitor_addr(void *rx_queue, struct rte_power_monitor_cond *pmc)
+{
+	struct pkt_rx_queue *rxq = rx_queue;
+	unsigned int *prod = rxq->rx.producer;
+	const uint32_t cur_val = rxq->rx.cached_prod; /* use cached value */
+
+	/* watch for changes in producer ring */
+	pmc->addr = (void *)prod;
+
+	/* store current value */
+	pmc->opaque[CLB_VAL_IDX] = cur_val;
+	pmc->fn = eth_monitor_callback;
+
+	/* AF_XDP producer ring index is 32-bit */
+	pmc->size = sizeof(uint32_t);
 
 	return 0;
 }
@@ -1448,6 +1479,7 @@ static const struct eth_dev_ops ops = {
 	.link_update = eth_link_update,
 	.stats_get = eth_stats_get,
 	.stats_reset = eth_stats_reset,
+	.get_monitor_addr = eth_get_monitor_addr,
 };
 
 /** parse busy_budget argument */

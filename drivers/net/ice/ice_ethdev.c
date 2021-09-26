@@ -12,6 +12,8 @@
 
 #include <rte_tailq.h>
 
+#include "eal_firmware.h"
+
 #include "base/ice_sched.h"
 #include "base/ice_flow.h"
 #include "base/ice_dcb.h"
@@ -26,11 +28,13 @@
 #define ICE_SAFE_MODE_SUPPORT_ARG "safe-mode-support"
 #define ICE_PIPELINE_MODE_SUPPORT_ARG  "pipeline-mode-support"
 #define ICE_PROTO_XTR_ARG         "proto_xtr"
+#define ICE_HW_DEBUG_MASK_ARG     "hw_debug_mask"
 
 static const char * const ice_valid_args[] = {
 	ICE_SAFE_MODE_SUPPORT_ARG,
 	ICE_PIPELINE_MODE_SUPPORT_ARG,
 	ICE_PROTO_XTR_ARG,
+	ICE_HW_DEBUG_MASK_ARG,
 	NULL
 };
 
@@ -1649,57 +1653,7 @@ ice_pf_setup(struct ice_pf *pf)
 	return 0;
 }
 
-/*
- * Extract device serial number from PCIe Configuration Space and
- * determine the pkg file path according to the DSN.
- */
-#ifndef RTE_EXEC_ENV_WINDOWS
-static int
-ice_pkg_file_search_path(struct rte_pci_device *pci_dev, char *pkg_file)
-{
-	off_t pos;
-	char opt_ddp_filename[ICE_MAX_PKG_FILENAME_SIZE];
-	uint32_t dsn_low, dsn_high;
-	memset(opt_ddp_filename, 0, ICE_MAX_PKG_FILENAME_SIZE);
-
-	pos = rte_pci_find_ext_capability(pci_dev, RTE_PCI_EXT_CAP_ID_DSN);
-
-	if (pos) {
-		if (rte_pci_read_config(pci_dev, &dsn_low, 4, pos + 4) < 0) {
-			PMD_INIT_LOG(ERR, "Failed to read pci config space\n");
-			return -1;
-		}
-		if (rte_pci_read_config(pci_dev, &dsn_high, 4, pos + 8) < 0) {
-			PMD_INIT_LOG(ERR, "Failed to read pci config space\n");
-			return -1;
-		}
-		snprintf(opt_ddp_filename, ICE_MAX_PKG_FILENAME_SIZE,
-			 "ice-%08x%08x.pkg", dsn_high, dsn_low);
-	} else {
-		PMD_INIT_LOG(ERR, "Failed to read device serial number\n");
-		goto fail_dsn;
-	}
-
-	strncpy(pkg_file, ICE_PKG_FILE_SEARCH_PATH_UPDATES,
-		ICE_MAX_PKG_FILENAME_SIZE);
-	if (!ice_access(strcat(pkg_file, opt_ddp_filename), 0))
-		return 0;
-
-	strncpy(pkg_file, ICE_PKG_FILE_SEARCH_PATH_DEFAULT,
-		ICE_MAX_PKG_FILENAME_SIZE);
-	if (!ice_access(strcat(pkg_file, opt_ddp_filename), 0))
-		return 0;
-
-fail_dsn:
-	strncpy(pkg_file, ICE_PKG_FILE_UPDATES, ICE_MAX_PKG_FILENAME_SIZE);
-	if (!ice_access(pkg_file, 0))
-		return 0;
-	strncpy(pkg_file, ICE_PKG_FILE_DEFAULT, ICE_MAX_PKG_FILENAME_SIZE);
-	return 0;
-}
-#endif
-
-enum ice_pkg_type
+static enum ice_pkg_type
 ice_load_pkg_type(struct ice_hw *hw)
 {
 	enum ice_pkg_type package_type;
@@ -1723,83 +1677,60 @@ ice_load_pkg_type(struct ice_hw *hw)
 	return package_type;
 }
 
-#ifndef RTE_EXEC_ENV_WINDOWS
-static int ice_load_pkg(struct rte_eth_dev *dev)
+int ice_load_pkg(struct ice_adapter *adapter, bool use_dsn, uint64_t dsn)
 {
-	struct ice_hw *hw = ICE_DEV_PRIVATE_TO_HW(dev->data->dev_private);
+	struct ice_hw *hw = &adapter->hw;
 	char pkg_file[ICE_MAX_PKG_FILENAME_SIZE];
+	char opt_ddp_filename[ICE_MAX_PKG_FILENAME_SIZE];
+	void *buf;
+	size_t bufsz;
 	int err;
-	uint8_t *buf;
-	int buf_len;
-	FILE *file;
-	struct stat fstat;
-	struct rte_pci_device *pci_dev = RTE_DEV_TO_PCI(dev->device);
-	struct ice_adapter *ad =
-		ICE_DEV_PRIVATE_TO_ADAPTER(dev->data->dev_private);
 
-	err = ice_pkg_file_search_path(pci_dev, pkg_file);
-	if (err) {
+	if (!use_dsn)
+		goto no_dsn;
+
+	memset(opt_ddp_filename, 0, ICE_MAX_PKG_FILENAME_SIZE);
+	snprintf(opt_ddp_filename, ICE_MAX_PKG_FILENAME_SIZE,
+		"ice-%016" PRIx64 ".pkg", dsn);
+	strncpy(pkg_file, ICE_PKG_FILE_SEARCH_PATH_UPDATES,
+		ICE_MAX_PKG_FILENAME_SIZE);
+	strcat(pkg_file, opt_ddp_filename);
+	if (rte_firmware_read(pkg_file, &buf, &bufsz) == 0)
+		goto load_fw;
+
+	strncpy(pkg_file, ICE_PKG_FILE_SEARCH_PATH_DEFAULT,
+		ICE_MAX_PKG_FILENAME_SIZE);
+	strcat(pkg_file, opt_ddp_filename);
+	if (rte_firmware_read(pkg_file, &buf, &bufsz) == 0)
+		goto load_fw;
+
+no_dsn:
+	strncpy(pkg_file, ICE_PKG_FILE_UPDATES, ICE_MAX_PKG_FILENAME_SIZE);
+	if (rte_firmware_read(pkg_file, &buf, &bufsz) == 0)
+		goto load_fw;
+
+	strncpy(pkg_file, ICE_PKG_FILE_DEFAULT, ICE_MAX_PKG_FILENAME_SIZE);
+	if (rte_firmware_read(pkg_file, &buf, &bufsz) < 0) {
 		PMD_INIT_LOG(ERR, "failed to search file path\n");
-		return err;
-	}
-
-	file = fopen(pkg_file, "rb");
-	if (!file)  {
-		PMD_INIT_LOG(ERR, "failed to open file: %s\n", pkg_file);
 		return -1;
 	}
 
-	err = stat(pkg_file, &fstat);
-	if (err) {
-		PMD_INIT_LOG(ERR, "failed to get file stats\n");
-		fclose(file);
-		return err;
-	}
+load_fw:
+	PMD_INIT_LOG(DEBUG, "DDP package name: %s", pkg_file);
 
-	buf_len = fstat.st_size;
-	buf = rte_malloc(NULL, buf_len, 0);
-
-	if (!buf) {
-		PMD_INIT_LOG(ERR, "failed to allocate buf of size %d for package\n",
-				buf_len);
-		fclose(file);
-		return -1;
-	}
-
-	err = fread(buf, buf_len, 1, file);
-	if (err != 1) {
-		PMD_INIT_LOG(ERR, "failed to read package data\n");
-		fclose(file);
-		err = -1;
-		goto fail_exit;
-	}
-
-	fclose(file);
-
-	err = ice_copy_and_init_pkg(hw, buf, buf_len);
+	err = ice_copy_and_init_pkg(hw, buf, bufsz);
 	if (err) {
 		PMD_INIT_LOG(ERR, "ice_copy_and_init_hw failed: %d\n", err);
-		goto fail_exit;
+		goto out;
 	}
 
 	/* store the loaded pkg type info */
-	ad->active_pkg_type = ice_load_pkg_type(hw);
+	adapter->active_pkg_type = ice_load_pkg_type(hw);
 
-	err = ice_init_hw_tbls(hw);
-	if (err) {
-		PMD_INIT_LOG(ERR, "ice_init_hw_tbls failed: %d\n", err);
-		goto fail_init_tbls;
-	}
-
-	return 0;
-
-fail_init_tbls:
-	rte_free(hw->pkg_copy);
-fail_exit:
-	rte_free(buf);
+out:
+	free(buf);
 	return err;
 }
-#endif
 
 static void
 ice_base_queue_get(struct ice_pf *pf)
@@ -1836,6 +1767,25 @@ parse_bool(const char *key, const char *value, void *args)
 	return 0;
 }
 
+static int
+parse_u64(const char *key, const char *value, void *args)
+{
+	u64 *num = (u64 *)args;
+	u64 tmp;
+
+	errno = 0;
+	tmp = strtoull(value, NULL, 16);
+	if (errno) {
+		PMD_DRV_LOG(WARNING, "%s: \"%s\" is not a valid u64",
+			    key, value);
+		return -1;
+	}
+
+	*num = tmp;
+
+	return 0;
+}
+
 static int ice_parse_devargs(struct rte_eth_dev *dev)
 {
 	struct ice_adapter *ad =
@@ -1869,6 +1819,11 @@ static int ice_parse_devargs(struct rte_eth_dev *dev)
 
 	ret = rte_kvargs_process(kvlist, ICE_PIPELINE_MODE_SUPPORT_ARG,
 				 &parse_bool, &ad->devargs.pipe_mode_support);
+	if (ret)
+		goto bail;
+
+	ret = rte_kvargs_process(kvlist, ICE_HW_DEBUG_MASK_ARG,
+				 &parse_u64, &ad->hw.debug_mask);
 	if (ret)
 		goto bail;
 
@@ -2030,6 +1985,12 @@ ice_dev_init(struct rte_eth_dev *dev)
 		ICE_DEV_PRIVATE_TO_ADAPTER(dev->data->dev_private);
 	struct ice_vsi *vsi;
 	int ret;
+#ifndef RTE_EXEC_ENV_WINDOWS
+	off_t pos;
+	uint32_t dsn_low, dsn_high;
+	uint64_t dsn;
+	bool use_dsn;
+#endif
 
 	dev->dev_ops = &ice_eth_dev_ops;
 	dev->rx_queue_count = ice_rx_queue_count;
@@ -2055,7 +2016,6 @@ ice_dev_init(struct rte_eth_dev *dev)
 	intr_handle = &pci_dev->intr_handle;
 
 	pf->adapter = ICE_DEV_PRIVATE_TO_ADAPTER(dev->data->dev_private);
-	pf->adapter->eth_dev = dev;
 	pf->dev_data = dev->data;
 	hw->back = pf->adapter;
 	hw->hw_addr = (uint8_t *)pci_dev->mem_resource[0].addr;
@@ -2081,12 +2041,35 @@ ice_dev_init(struct rte_eth_dev *dev)
 	}
 
 #ifndef RTE_EXEC_ENV_WINDOWS
-	ret = ice_load_pkg(dev);
+	use_dsn = false;
+	dsn = 0;
+	pos = rte_pci_find_ext_capability(pci_dev, RTE_PCI_EXT_CAP_ID_DSN);
+	if (pos) {
+		if (rte_pci_read_config(pci_dev, &dsn_low, 4, pos + 4) < 0 ||
+				rte_pci_read_config(pci_dev, &dsn_high, 4, pos + 8) < 0) {
+			PMD_INIT_LOG(ERR, "Failed to read pci config space\n");
+		} else {
+			use_dsn = true;
+			dsn = (uint64_t)dsn_high << 32 | dsn_low;
+		}
+	} else {
+		PMD_INIT_LOG(ERR, "Failed to read device serial number\n");
+	}
+
+	ret = ice_load_pkg(pf->adapter, use_dsn, dsn);
+	if (ret == 0) {
+		ret = ice_init_hw_tbls(hw);
+		if (ret) {
+			PMD_INIT_LOG(ERR, "ice_init_hw_tbls failed: %d\n", ret);
+			rte_free(hw->pkg_copy);
+		}
+	}
+
 	if (ret) {
 		if (ad->devargs.safe_mode_support == 0) {
 			PMD_INIT_LOG(ERR, "Failed to load the DDP package,"
 					"Use safe-mode-support=1 to enter Safe Mode");
-			return ret;
+			goto err_init_fw;
 		}
 
 		PMD_INIT_LOG(WARNING, "Failed to load the DDP package,"
@@ -2156,30 +2139,37 @@ ice_dev_init(struct rte_eth_dev *dev)
 		ret = ice_flow_init(ad);
 		if (ret) {
 			PMD_INIT_LOG(ERR, "Failed to initialize flow");
-			return ret;
+			goto err_flow_init;
 		}
 	}
 
 	ret = ice_reset_fxp_resource(hw);
 	if (ret) {
 		PMD_INIT_LOG(ERR, "Failed to reset fxp resource");
-		return ret;
+		goto err_flow_init;
 	}
 
 	pf->supported_rxdid = ice_get_supported_rxdid(hw);
 
 	return 0;
 
+err_flow_init:
+	ice_flow_uninit(ad);
+	rte_intr_disable(intr_handle);
+	ice_pf_disable_irq0(hw);
+	rte_intr_callback_unregister(intr_handle,
+				     ice_interrupt_handler, dev);
 err_pf_setup:
 	ice_res_pool_destroy(&pf->msix_pool);
 err_msix_pool_init:
 	rte_free(dev->data->mac_addrs);
 	dev->data->mac_addrs = NULL;
 err_init_mac:
-	ice_sched_cleanup_all(hw);
-	rte_free(hw->port_info);
-	ice_shutdown_all_ctrlq(hw);
 	rte_free(pf->proto_xtr);
+#ifndef RTE_EXEC_ENV_WINDOWS
+err_init_fw:
+#endif
+	ice_deinit_hw(hw);
 
 	return ret;
 }
@@ -2218,7 +2208,7 @@ ice_release_vsi(struct ice_vsi *vsi)
 void
 ice_vsi_disable_queues_intr(struct ice_vsi *vsi)
 {
-	struct rte_eth_dev *dev = vsi->adapter->eth_dev;
+	struct rte_eth_dev *dev = &rte_eth_devices[vsi->adapter->pf.dev_data->port_id];
 	struct rte_pci_device *pci_dev = ICE_DEV_TO_PCI(dev);
 	struct rte_intr_handle *intr_handle = &pci_dev->intr_handle;
 	struct ice_hw *hw = ICE_VSI_TO_HW(vsi);
@@ -2832,7 +2822,9 @@ ice_rss_hash_set(struct ice_pf *pf, uint64_t rss_hf)
 	ETH_RSS_NONFRAG_IPV4_TCP | \
 	ETH_RSS_NONFRAG_IPV6_TCP | \
 	ETH_RSS_NONFRAG_IPV4_SCTP | \
-	ETH_RSS_NONFRAG_IPV6_SCTP)
+	ETH_RSS_NONFRAG_IPV6_SCTP | \
+	ETH_RSS_FRAG_IPV4 | \
+	ETH_RSS_FRAG_IPV6)
 
 	ret = ice_rem_vsi_rss_cfg(hw, vsi->idx);
 	if (ret)
@@ -2987,14 +2979,57 @@ ice_rss_hash_set(struct ice_pf *pf, uint64_t rss_hf)
 				    __func__, ret);
 	}
 
+	if (rss_hf & ETH_RSS_FRAG_IPV4) {
+		cfg.addl_hdrs = ICE_FLOW_SEG_HDR_IPV4 | ICE_FLOW_SEG_HDR_IPV_FRAG;
+		cfg.hash_flds = ICE_FLOW_HASH_IPV4;
+		ret = ice_add_rss_cfg_wrap(pf, vsi->idx, &cfg);
+		if (ret)
+			PMD_DRV_LOG(ERR, "%s IPV4_FRAG rss flow fail %d",
+				    __func__, ret);
+	}
+
+	if (rss_hf & ETH_RSS_FRAG_IPV6) {
+		cfg.addl_hdrs = ICE_FLOW_SEG_HDR_IPV6 | ICE_FLOW_SEG_HDR_IPV_FRAG;
+		cfg.hash_flds = ICE_FLOW_HASH_IPV6;
+		ret = ice_add_rss_cfg_wrap(pf, vsi->idx, &cfg);
+		if (ret)
+			PMD_DRV_LOG(ERR, "%s IPV6_FRAG rss flow fail %d",
+				    __func__, ret);
+	}
+
 	pf->rss_hf = rss_hf & ICE_RSS_HF_ALL;
+}
+
+static void
+ice_get_default_rss_key(uint8_t *rss_key, uint32_t rss_key_size)
+{
+	static struct ice_aqc_get_set_rss_keys default_key;
+	static bool default_key_done;
+	uint8_t *key = (uint8_t *)&default_key;
+	size_t i;
+
+	if (rss_key_size > sizeof(default_key)) {
+		PMD_DRV_LOG(WARNING,
+			    "requested size %u is larger than default %zu, "
+			    "only %zu bytes are gotten for key\n",
+			    rss_key_size, sizeof(default_key),
+			    sizeof(default_key));
+	}
+
+	if (!default_key_done) {
+		/* Calculate the default hash key */
+		for (i = 0; i < sizeof(default_key); i++)
+			key[i] = (uint8_t)rte_rand();
+		default_key_done = true;
+	}
+	rte_memcpy(rss_key, key, RTE_MIN(rss_key_size, sizeof(default_key)));
 }
 
 static int ice_init_rss(struct ice_pf *pf)
 {
 	struct ice_hw *hw = ICE_PF_TO_HW(pf);
 	struct ice_vsi *vsi = pf->main_vsi;
-	struct rte_eth_dev *dev = pf->adapter->eth_dev;
+	struct rte_eth_dev_data *dev_data = pf->dev_data;
 	struct ice_aq_get_set_rss_lut_params lut_params;
 	struct rte_eth_rss_conf *rss_conf;
 	struct ice_aqc_get_set_rss_keys key;
@@ -3003,8 +3038,8 @@ static int ice_init_rss(struct ice_pf *pf)
 	bool is_safe_mode = pf->adapter->is_safe_mode;
 	uint32_t reg;
 
-	rss_conf = &dev->data->dev_conf.rx_adv_conf.rss_conf;
-	nb_q = dev->data->nb_rx_queues;
+	rss_conf = &dev_data->dev_conf.rx_adv_conf.rss_conf;
+	nb_q = dev_data->nb_rx_queues;
 	vsi->rss_key_size = ICE_AQC_GET_SET_RSS_KEY_DATA_RSS_KEY_SIZE;
 	vsi->rss_lut_size = pf->hash_lut_size;
 
@@ -3038,15 +3073,13 @@ static int ice_init_rss(struct ice_pf *pf)
 		}
 	}
 	/* configure RSS key */
-	if (!rss_conf->rss_key) {
-		/* Calculate the default hash key */
-		for (i = 0; i < vsi->rss_key_size; i++)
-			vsi->rss_key[i] = (uint8_t)rte_rand();
-	} else {
+	if (!rss_conf->rss_key)
+		ice_get_default_rss_key(vsi->rss_key, vsi->rss_key_size);
+	else
 		rte_memcpy(vsi->rss_key, rss_conf->rss_key,
 			   RTE_MIN(rss_conf->rss_key_len,
 				   vsi->rss_key_size));
-	}
+
 	rte_memcpy(key.standard_rss_key, vsi->rss_key, vsi->rss_key_size);
 	ret = ice_aq_set_rss_key(hw, vsi->idx, &key);
 	if (ret)
@@ -3138,7 +3171,7 @@ __vsi_queues_bind_intr(struct ice_vsi *vsi, uint16_t msix_vect,
 void
 ice_vsi_queues_bind_intr(struct ice_vsi *vsi)
 {
-	struct rte_eth_dev *dev = vsi->adapter->eth_dev;
+	struct rte_eth_dev *dev = &rte_eth_devices[vsi->adapter->pf.dev_data->port_id];
 	struct rte_pci_device *pci_dev = ICE_DEV_TO_PCI(dev);
 	struct rte_intr_handle *intr_handle = &pci_dev->intr_handle;
 	struct ice_hw *hw = ICE_VSI_TO_HW(vsi);
@@ -3191,7 +3224,7 @@ ice_vsi_queues_bind_intr(struct ice_vsi *vsi)
 void
 ice_vsi_enable_queues_intr(struct ice_vsi *vsi)
 {
-	struct rte_eth_dev *dev = vsi->adapter->eth_dev;
+	struct rte_eth_dev *dev = &rte_eth_devices[vsi->adapter->pf.dev_data->port_id];
 	struct rte_pci_device *pci_dev = ICE_DEV_TO_PCI(dev);
 	struct rte_intr_handle *intr_handle = &pci_dev->intr_handle;
 	struct ice_hw *hw = ICE_VSI_TO_HW(vsi);
@@ -5284,6 +5317,7 @@ RTE_PMD_REGISTER_PCI(net_ice, rte_ice_pmd);
 RTE_PMD_REGISTER_PCI_TABLE(net_ice, pci_id_ice_map);
 RTE_PMD_REGISTER_KMOD_DEP(net_ice, "* igb_uio | uio_pci_generic | vfio-pci");
 RTE_PMD_REGISTER_PARAM_STRING(net_ice,
+			      ICE_HW_DEBUG_MASK_ARG "=0xXXX"
 			      ICE_PROTO_XTR_ARG "=[queue:]<vlan|ipv4|ipv6|ipv6_flow|tcp|ip_offset>"
 			      ICE_SAFE_MODE_SUPPORT_ARG "=<0|1>"
 			      ICE_PIPELINE_MODE_SUPPORT_ARG "=<0|1>");

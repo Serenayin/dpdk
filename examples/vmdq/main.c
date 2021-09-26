@@ -61,6 +61,8 @@ static uint32_t num_queues = 8;
 static uint32_t num_pools = 8;
 static uint8_t rss_enable;
 
+/* Default structure for VMDq. 8< */
+
 /* empty vmdq configuration structure. Filled in programatically */
 static const struct rte_eth_conf vmdq_conf_default = {
 	.rxmode = {
@@ -85,6 +87,7 @@ static const struct rte_eth_conf vmdq_conf_default = {
 		},
 	},
 };
+/* >8 End of Empty vdmq configuration structure. */
 
 static unsigned lcore_ids[RTE_MAX_LCORE];
 static uint16_t ports[RTE_MAX_ETHPORTS];
@@ -93,6 +96,7 @@ static unsigned num_ports; /**< The number of ports specified in command line */
 /* array used for printing out statistics */
 volatile unsigned long rxPackets[MAX_QUEUES] = {0};
 
+/* vlan_tags 8< */
 const uint16_t vlan_tags[] = {
 	0,  1,  2,  3,  4,  5,  6,  7,
 	8,  9, 10, 11,	12, 13, 14, 15,
@@ -103,13 +107,19 @@ const uint16_t vlan_tags[] = {
 	48, 49, 50, 51, 52, 53, 54, 55,
 	56, 57, 58, 59, 60, 61, 62, 63,
 };
+/* >8 End of vlan_tags. */
+
 const uint16_t num_vlans = RTE_DIM(vlan_tags);
 static uint16_t num_pf_queues,  num_vmdq_queues;
 static uint16_t vmdq_pool_base, vmdq_queue_base;
+
+/* Pool mac address template. 8< */
+
 /* pool mac addr template, pool mac addr is like: 52 54 00 12 port# pool# */
 static struct rte_ether_addr pool_addr_template = {
 	.addr_bytes = {0x52, 0x54, 0x00, 0x12, 0x00, 0x00}
 };
+/* >8 End of mac addr template. */
 
 /* ethernet addresses of ports */
 static struct rte_ether_addr vmdq_ports_eth_addr[RTE_MAX_ETHPORTS];
@@ -125,6 +135,8 @@ static struct rte_ether_addr vmdq_ports_eth_addr[RTE_MAX_ETHPORTS];
  * given above, and determine the queue number and pool map number according to
  * valid pool number
  */
+
+ /* Building correct configruration for vdmq. 8< */
 static inline int
 get_eth_conf(struct rte_eth_conf *eth_conf, uint32_t num_pools)
 {
@@ -305,12 +317,7 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 	printf("Port %u MAC: %02"PRIx8" %02"PRIx8" %02"PRIx8
 			" %02"PRIx8" %02"PRIx8" %02"PRIx8"\n",
 			(unsigned)port,
-			vmdq_ports_eth_addr[port].addr_bytes[0],
-			vmdq_ports_eth_addr[port].addr_bytes[1],
-			vmdq_ports_eth_addr[port].addr_bytes[2],
-			vmdq_ports_eth_addr[port].addr_bytes[3],
-			vmdq_ports_eth_addr[port].addr_bytes[4],
-			vmdq_ports_eth_addr[port].addr_bytes[5]);
+			RTE_ETHER_ADDR_BYTES(&vmdq_ports_eth_addr[port]));
 
 	/*
 	 * Set mac for each pool.
@@ -322,11 +329,8 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 		mac = pool_addr_template;
 		mac.addr_bytes[4] = port;
 		mac.addr_bytes[5] = q;
-		printf("Port %u vmdq pool %u set mac %02x:%02x:%02x:%02x:%02x:%02x\n",
-			port, q,
-			mac.addr_bytes[0], mac.addr_bytes[1],
-			mac.addr_bytes[2], mac.addr_bytes[3],
-			mac.addr_bytes[4], mac.addr_bytes[5]);
+		printf("Port %u vmdq pool %u set mac " RTE_ETHER_ADDR_PRT_FMT "\n",
+			port, q, RTE_ETHER_ADDR_BYTES(&mac));
 		retval = rte_eth_dev_mac_addr_add(port, &mac,
 				q + vmdq_pool_base);
 		if (retval) {
@@ -337,6 +341,7 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 
 	return 0;
 }
+/* >8 End of get_eth_conf. */
 
 /* Check num_pools parameter and set it if OK*/
 static int

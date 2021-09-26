@@ -473,17 +473,13 @@ update_client_stats(uint32_t addr, uint16_t port, uint32_t *TXorRXindicator)
 #ifdef RTE_LIBRTE_BOND_DEBUG_ALB
 #define MODE6_DEBUG(info, src_ip, dst_ip, eth_h, arp_op, port, burstnumber) \
 	rte_log(RTE_LOG_DEBUG, bond_logtype,				\
-		"%s port:%d SrcMAC:%02X:%02X:%02X:%02X:%02X:%02X SrcIP:%s " \
-		"DstMAC:%02X:%02X:%02X:%02X:%02X:%02X DstIP:%s %s %d\n", \
+		"%s port:%d SrcMAC:" RTE_ETHER_ADDR_PRT_FMT " SrcIP:%s " \
+		"DstMAC:" RTE_ETHER_ADDR_PRT_FMT " DstIP:%s %s %d\n", \
 		info,							\
 		port,							\
-		eth_h->s_addr.addr_bytes[0], eth_h->s_addr.addr_bytes[1], \
-		eth_h->s_addr.addr_bytes[2], eth_h->s_addr.addr_bytes[3], \
-		eth_h->s_addr.addr_bytes[4], eth_h->s_addr.addr_bytes[5], \
+		RTE_ETHER_ADDR_BYTES(&eth_h->s_addr),                  \
 		src_ip,							\
-		eth_h->d_addr.addr_bytes[0], eth_h->d_addr.addr_bytes[1], \
-		eth_h->d_addr.addr_bytes[2], eth_h->d_addr.addr_bytes[3], \
-		eth_h->d_addr.addr_bytes[4], eth_h->d_addr.addr_bytes[5], \
+		RTE_ETHER_ADDR_BYTES(&eth_h->d_addr),                  \
 		dst_ip,							\
 		arp_op, ++burstnumber)
 #endif
@@ -1805,12 +1801,13 @@ slave_configure(struct rte_eth_dev *bonded_eth_dev,
 				!= 0)
 			return errval;
 
-		if (bond_ethdev_8023ad_flow_verify(bonded_eth_dev,
-				slave_eth_dev->data->port_id) != 0) {
+		errval = bond_ethdev_8023ad_flow_verify(bonded_eth_dev,
+				slave_eth_dev->data->port_id);
+		if (errval != 0) {
 			RTE_BOND_LOG(ERR,
-				"rte_eth_tx_queue_setup: port=%d queue_id %d, err (%d)",
-				slave_eth_dev->data->port_id, q_id, errval);
-			return -1;
+				"bond_ethdev_8023ad_flow_verify: port=%d, err (%d)",
+				slave_eth_dev->data->port_id, errval);
+			return errval;
 		}
 
 		if (internals->mode4.dedicated_queues.flow[slave_eth_dev->data->port_id] != NULL)
@@ -1818,8 +1815,14 @@ slave_configure(struct rte_eth_dev *bonded_eth_dev,
 					internals->mode4.dedicated_queues.flow[slave_eth_dev->data->port_id],
 					&flow_error);
 
-		bond_ethdev_8023ad_flow_set(bonded_eth_dev,
+		errval = bond_ethdev_8023ad_flow_set(bonded_eth_dev,
 				slave_eth_dev->data->port_id);
+		if (errval != 0) {
+			RTE_BOND_LOG(ERR,
+				"bond_ethdev_8023ad_flow_set: port=%d, err (%d)",
+				slave_eth_dev->data->port_id, errval);
+			return errval;
+		}
 	}
 
 	/* Start device */

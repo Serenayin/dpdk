@@ -20,6 +20,7 @@
 #include "hns3_rxtx.h"
 #include "hns3_regs.h"
 #include "hns3_logs.h"
+#include "hns3_mp.h"
 
 #define HNS3_CFG_DESC_NUM(num)	((num) / 8 - 1)
 #define HNS3_RX_RING_PREFETCTH_MASK	3
@@ -696,7 +697,7 @@ hns3_reset_rcb_cmd(struct hns3_hw *hw, uint8_t *reset_status)
 
 	hns3_cmd_setup_basic_desc(&desc, HNS3_OPC_CFG_RST_TRIGGER, false);
 	req = (struct hns3_reset_cmd *)desc.data;
-	hns3_set_bit(req->mac_func_reset, HNS3_CFG_RESET_RCB_B, 1);
+	hns3_set_bit(req->fun_reset_rcb, HNS3_CFG_RESET_RCB_B, 1);
 
 	/*
 	 * The start qid should be the global qid of the first tqp of the
@@ -1616,6 +1617,9 @@ hns3_set_fake_rx_or_tx_queues(struct rte_eth_dev *dev, uint16_t nb_rx_q,
 	uint16_t port_id;
 	uint16_t q;
 	int ret;
+
+	if (hns3_dev_indep_txrx_supported(hw))
+		return 0;
 
 	/* Setup new number of fake RX/TX queues and reconfigure device. */
 	rx_need_add_nb_q = hw->cfg_max_queues - nb_rx_q;
@@ -2808,7 +2812,7 @@ hns3_get_default_vec_support(void)
 static bool
 hns3_get_sve_support(void)
 {
-#if defined(RTE_ARCH_ARM64) && defined(__ARM_FEATURE_SVE)
+#if defined(RTE_HAS_SVE_ACLE)
 	if (rte_vect_get_max_simd_bitwidth() < RTE_VECT_SIMD_256)
 		return false;
 	if (rte_cpu_get_flag_enabled(RTE_CPUFLAG_SVE))
@@ -2890,6 +2894,69 @@ hns3_tx_queue_conf_check(struct hns3_hw *hw, const struct rte_eth_txconf *conf,
 	*tx_rs_thresh = rs_thresh;
 	*tx_free_thresh = free_thresh;
 	return 0;
+}
+
+static void *
+hns3_tx_push_get_queue_tail_reg(struct rte_eth_dev *dev, uint16_t queue_id)
+{
+#define HNS3_TX_PUSH_TQP_REGION_SIZE		0x10000
+#define HNS3_TX_PUSH_QUICK_DOORBELL_OFFSET	64
+#define HNS3_TX_PUSH_PCI_BAR_INDEX		4
+
+	struct rte_pci_device *pci_dev = RTE_DEV_TO_PCI(dev->device);
+	uint8_t bar_id = HNS3_TX_PUSH_PCI_BAR_INDEX;
+
+	/*
+	 * If device support Tx push then its PCIe bar45 must exist, and DPDK
+	 * framework will mmap the bar45 default in PCI probe stage.
+	 *
+	 * In the bar45, the first half is for RoCE (RDMA over Converged
+	 * Ethernet), and the second half is for NIC, every TQP occupy 64KB.
+	 *
+	 * The quick doorbell located at 64B offset in the TQP region.
+	 */
+	return (char *)pci_dev->mem_resource[bar_id].addr +
+			(pci_dev->mem_resource[bar_id].len >> 1) +
+			HNS3_TX_PUSH_TQP_REGION_SIZE * queue_id +
+			HNS3_TX_PUSH_QUICK_DOORBELL_OFFSET;
+}
+
+void
+hns3_tx_push_init(struct rte_eth_dev *dev)
+{
+	struct hns3_hw *hw = HNS3_DEV_PRIVATE_TO_HW(dev->data->dev_private);
+	volatile uint32_t *reg;
+	uint32_t val;
+
+	if (!hns3_dev_tx_push_supported(hw))
+		return;
+
+	reg = (volatile uint32_t *)hns3_tx_push_get_queue_tail_reg(dev, 0);
+	/*
+	 * Because the size of bar45 is about 8GB size, it may take a long time
+	 * to do the page fault in Tx process when work with vfio-pci, so use
+	 * one read operation to make kernel setup page table mapping for bar45
+	 * in the init stage.
+	 * Note: the bar45 is readable but the result is all 1.
+	 */
+	val = *reg;
+	RTE_SET_USED(val);
+}
+
+static void
+hns3_tx_push_queue_init(struct rte_eth_dev *dev,
+			uint16_t queue_id,
+			struct hns3_tx_queue *txq)
+{
+	struct hns3_hw *hw = HNS3_DEV_PRIVATE_TO_HW(dev->data->dev_private);
+	if (!hns3_dev_tx_push_supported(hw)) {
+		txq->tx_push_enable = false;
+		return;
+	}
+
+	txq->io_tail_reg = (volatile void *)hns3_tx_push_get_queue_tail_reg(dev,
+						queue_id);
+	txq->tx_push_enable = true;
 }
 
 int
@@ -2982,6 +3049,12 @@ hns3_tx_queue_setup(struct rte_eth_dev *dev, uint16_t idx, uint16_t nb_desc,
 	txq->udp_cksum_mode = hw->udp_cksum_mode;
 	memset(&txq->basic_stats, 0, sizeof(struct hns3_tx_basic_stats));
 	memset(&txq->dfx_stats, 0, sizeof(struct hns3_tx_dfx_stats));
+
+	/*
+	 * Call hns3_tx_push_queue_init after assigned io_tail_reg field because
+	 * it may overwrite the io_tail_reg field.
+	 */
+	hns3_tx_push_queue_init(dev, idx, txq);
 
 	rte_spinlock_lock(&hw->lock);
 	dev->data->tx_queues[idx] = txq;
@@ -4029,7 +4102,7 @@ hns3_xmit_pkts_simple(void *tx_queue,
 	hns3_tx_fill_hw_ring(txq, tx_pkts + nb_tx, nb_pkts - nb_tx);
 	txq->next_to_use += nb_pkts - nb_tx;
 
-	hns3_write_reg_opt(txq->io_tail_reg, nb_pkts);
+	hns3_write_txq_tail_reg(txq, nb_pkts);
 
 	return nb_pkts;
 }
@@ -4146,7 +4219,7 @@ hns3_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
 end_of_tx:
 
 	if (likely(nb_tx))
-		hns3_write_reg_opt(txq->io_tail_reg, nb_hold);
+		hns3_write_txq_tail_reg(txq, nb_hold);
 
 	return nb_tx;
 }
@@ -4237,7 +4310,7 @@ hns3_get_tx_prep_needed(struct rte_eth_dev *dev)
 #endif
 }
 
-static eth_tx_burst_t
+eth_tx_burst_t
 hns3_get_tx_function(struct rte_eth_dev *dev, eth_tx_prep_t *prep)
 {
 	struct hns3_adapter *hns = dev->data->dev_private;
@@ -4274,7 +4347,7 @@ hns3_get_tx_function(struct rte_eth_dev *dev, eth_tx_prep_t *prep)
 	return hns3_xmit_pkts;
 }
 
-static uint16_t
+uint16_t
 hns3_dummy_rxtx_burst(void *dpdk_txq __rte_unused,
 		      struct rte_mbuf **pkts __rte_unused,
 		      uint16_t pkts_n __rte_unused)
@@ -4300,6 +4373,7 @@ hns3_trace_rxtx_function(struct rte_eth_dev *dev)
 
 void hns3_set_rxtx_function(struct rte_eth_dev *eth_dev)
 {
+	struct hns3_hw *hw = HNS3_DEV_PRIVATE_TO_HW(eth_dev->data->dev_private);
 	struct hns3_adapter *hns = eth_dev->data->dev_private;
 	eth_tx_prep_t prep = NULL;
 
@@ -4307,14 +4381,16 @@ void hns3_set_rxtx_function(struct rte_eth_dev *eth_dev)
 	    __atomic_load_n(&hns->hw.reset.resetting, __ATOMIC_RELAXED) == 0) {
 		eth_dev->rx_pkt_burst = hns3_get_rx_function(eth_dev);
 		eth_dev->rx_descriptor_status = hns3_dev_rx_descriptor_status;
-		eth_dev->tx_pkt_burst = hns3_get_tx_function(eth_dev, &prep);
+		eth_dev->tx_pkt_burst = hw->set_link_down ?
+					hns3_dummy_rxtx_burst :
+					hns3_get_tx_function(eth_dev, &prep);
 		eth_dev->tx_pkt_prepare = prep;
 		eth_dev->tx_descriptor_status = hns3_dev_tx_descriptor_status;
 		hns3_trace_rxtx_function(eth_dev);
 	} else {
 		eth_dev->rx_pkt_burst = hns3_dummy_rxtx_burst;
 		eth_dev->tx_pkt_burst = hns3_dummy_rxtx_burst;
-		eth_dev->tx_pkt_prepare = hns3_dummy_rxtx_burst;
+		eth_dev->tx_pkt_prepare = NULL;
 	}
 }
 
@@ -4630,4 +4706,26 @@ hns3_enable_rxd_adv_layout(struct hns3_hw *hw)
 	 */
 	if (hns3_dev_rxd_adv_layout_supported(hw))
 		hns3_write_dev(hw, HNS3_RXD_ADV_LAYOUT_EN_REG, 1);
+}
+
+void
+hns3_stop_tx_datapath(struct rte_eth_dev *dev)
+{
+	dev->tx_pkt_burst = hns3_dummy_rxtx_burst;
+	dev->tx_pkt_prepare = NULL;
+	rte_wmb();
+	/* Disable tx datapath on secondary process. */
+	hns3_mp_req_stop_tx(dev);
+	/* Prevent crashes when queues are still in use. */
+	rte_delay_ms(dev->data->nb_tx_queues);
+}
+
+void
+hns3_start_tx_datapath(struct rte_eth_dev *dev)
+{
+	eth_tx_prep_t prep = NULL;
+
+	dev->tx_pkt_burst = hns3_get_tx_function(dev, &prep);
+	dev->tx_pkt_prepare = prep;
+	hns3_mp_req_start_tx(dev);
 }

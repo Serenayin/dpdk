@@ -369,14 +369,8 @@ port_init(uint16_t port)
 
 	RTE_LOG(INFO, VHOST_PORT, "Max virtio devices supported: %u\n", num_devices);
 	RTE_LOG(INFO, VHOST_PORT, "Port %u MAC: %02"PRIx8" %02"PRIx8" %02"PRIx8
-			" %02"PRIx8" %02"PRIx8" %02"PRIx8"\n",
-			port,
-			vmdq_ports_eth_addr[port].addr_bytes[0],
-			vmdq_ports_eth_addr[port].addr_bytes[1],
-			vmdq_ports_eth_addr[port].addr_bytes[2],
-			vmdq_ports_eth_addr[port].addr_bytes[3],
-			vmdq_ports_eth_addr[port].addr_bytes[4],
-			vmdq_ports_eth_addr[port].addr_bytes[5]);
+		" %02"PRIx8" %02"PRIx8" %02"PRIx8"\n",
+		port, RTE_ETHER_ADDR_BYTES(&vmdq_ports_eth_addr[port]));
 
 	return 0;
 }
@@ -778,11 +772,8 @@ link_vmdq(struct vhost_dev *vdev, struct rte_mbuf *m)
 
 	/* Print out VMDQ registration info. */
 	RTE_LOG(INFO, VHOST_DATA,
-		"(%d) mac %02x:%02x:%02x:%02x:%02x:%02x and vlan %d registered\n",
-		vdev->vid,
-		vdev->mac_address.addr_bytes[0], vdev->mac_address.addr_bytes[1],
-		vdev->mac_address.addr_bytes[2], vdev->mac_address.addr_bytes[3],
-		vdev->mac_address.addr_bytes[4], vdev->mac_address.addr_bytes[5],
+		"(%d) mac " RTE_ETHER_ADDR_PRT_FMT " and vlan %d registered\n",
+		vdev->vid, RTE_ETHER_ADDR_BYTES(&vdev->mac_address),
 		vdev->vlan_tag);
 
 	/* Register the MAC address. */
@@ -851,8 +842,11 @@ complete_async_pkts(struct vhost_dev *vdev)
 
 	complete_count = rte_vhost_poll_enqueue_completed(vdev->vid,
 					VIRTIO_RXQ, p_cpl, MAX_PKT_BURST);
-	if (complete_count)
+	if (complete_count) {
 		free_pkts(p_cpl, complete_count);
+		__atomic_sub_fetch(&vdev->pkts_inflight, complete_count, __ATOMIC_SEQ_CST);
+	}
+
 }
 
 static __rte_always_inline void
@@ -888,16 +882,11 @@ drain_vhost(struct vhost_dev *vdev)
 	if (builtin_net_driver) {
 		ret = vs_enqueue_pkts(vdev, VIRTIO_RXQ, m, nr_xmit);
 	} else if (async_vhost_driver) {
-		uint32_t cpu_cpl_nr = 0;
 		uint16_t enqueue_fail = 0;
-		struct rte_mbuf *m_cpu_cpl[nr_xmit];
 
 		complete_async_pkts(vdev);
-		ret = rte_vhost_submit_enqueue_burst(vdev->vid, VIRTIO_RXQ,
-					m, nr_xmit, m_cpu_cpl, &cpu_cpl_nr);
-
-		if (cpu_cpl_nr)
-			free_pkts(m_cpu_cpl, cpu_cpl_nr);
+		ret = rte_vhost_submit_enqueue_burst(vdev->vid, VIRTIO_RXQ, m, nr_xmit);
+		__atomic_add_fetch(&vdev->pkts_inflight, ret, __ATOMIC_SEQ_CST);
 
 		enqueue_fail = nr_xmit - ret;
 		if (enqueue_fail)
@@ -1218,16 +1207,12 @@ drain_eth_rx(struct vhost_dev *vdev)
 		enqueue_count = vs_enqueue_pkts(vdev, VIRTIO_RXQ,
 						pkts, rx_count);
 	} else if (async_vhost_driver) {
-		uint32_t cpu_cpl_nr = 0;
 		uint16_t enqueue_fail = 0;
-		struct rte_mbuf *m_cpu_cpl[MAX_PKT_BURST];
 
 		complete_async_pkts(vdev);
 		enqueue_count = rte_vhost_submit_enqueue_burst(vdev->vid,
-					VIRTIO_RXQ, pkts, rx_count,
-					m_cpu_cpl, &cpu_cpl_nr);
-		if (cpu_cpl_nr)
-			free_pkts(m_cpu_cpl, cpu_cpl_nr);
+					VIRTIO_RXQ, pkts, rx_count);
+		__atomic_add_fetch(&vdev->pkts_inflight, enqueue_count, __ATOMIC_SEQ_CST);
 
 		enqueue_fail = rx_count - enqueue_count;
 		if (enqueue_fail)
@@ -1397,8 +1382,19 @@ destroy_device(int vid)
 		"(%d) device has been removed from data core\n",
 		vdev->vid);
 
-	if (async_vhost_driver)
+	if (async_vhost_driver) {
+		uint16_t n_pkt = 0;
+		struct rte_mbuf *m_cpl[vdev->pkts_inflight];
+
+		while (vdev->pkts_inflight) {
+			n_pkt = rte_vhost_clear_queue_thread_unsafe(vid, VIRTIO_RXQ,
+						m_cpl, vdev->pkts_inflight);
+			free_pkts(m_cpl, n_pkt);
+			__atomic_sub_fetch(&vdev->pkts_inflight, n_pkt, __ATOMIC_SEQ_CST);
+		}
+
 		rte_vhost_async_channel_unregister(vid, VIRTIO_RXQ);
+	}
 
 	rte_free(vdev);
 }
@@ -1468,7 +1464,7 @@ new_device(int vid)
 		vid, vdev->coreid);
 
 	if (async_vhost_driver) {
-		struct rte_vhost_async_features f;
+		struct rte_vhost_async_config config = {0};
 		struct rte_vhost_async_channel_ops channel_ops;
 
 		if (dma_type != NULL && strncmp(dma_type, "ioat", 4) == 0) {
@@ -1476,11 +1472,42 @@ new_device(int vid)
 			channel_ops.check_completed_copies =
 				ioat_check_completed_copies_cb;
 
-			f.async_inorder = 1;
-			f.async_threshold = 256;
+			config.features = RTE_VHOST_ASYNC_INORDER;
 
 			return rte_vhost_async_channel_register(vid, VIRTIO_RXQ,
-				f.intval, &channel_ops);
+				config, &channel_ops);
+		}
+	}
+
+	return 0;
+}
+
+static int
+vring_state_changed(int vid, uint16_t queue_id, int enable)
+{
+	struct vhost_dev *vdev = NULL;
+
+	TAILQ_FOREACH(vdev, &vhost_dev_list, global_vdev_entry) {
+		if (vdev->vid == vid)
+			break;
+	}
+	if (!vdev)
+		return -1;
+
+	if (queue_id != VIRTIO_RXQ)
+		return 0;
+
+	if (async_vhost_driver) {
+		if (!enable) {
+			uint16_t n_pkt = 0;
+			struct rte_mbuf *m_cpl[vdev->pkts_inflight];
+
+			while (vdev->pkts_inflight) {
+				n_pkt = rte_vhost_clear_queue_thread_unsafe(vid, queue_id,
+							m_cpl, vdev->pkts_inflight);
+				free_pkts(m_cpl, n_pkt);
+				__atomic_sub_fetch(&vdev->pkts_inflight, n_pkt, __ATOMIC_SEQ_CST);
+			}
 		}
 	}
 
@@ -1495,6 +1522,7 @@ static const struct vhost_device_ops virtio_net_device_ops =
 {
 	.new_device =  new_device,
 	.destroy_device = destroy_device,
+	.vring_state_changed = vring_state_changed,
 };
 
 /*

@@ -26,8 +26,11 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <zlib.h>
+
 #include <rte_bitops.h>
 #include <rte_string_fns.h>
+
+#include "eal_firmware.h"
 
 #define BNX2X_PMD_VER_PREFIX "BNX2X PMD"
 #define BNX2X_PMD_VERSION_MAJOR 1
@@ -8173,7 +8176,7 @@ static int bnx2x_get_shmem_info(struct bnx2x_softc *sc)
 		sc->link_params.mac_addr[4] = (uint8_t) (mac_lo >> 8);
 		sc->link_params.mac_addr[5] = (uint8_t) (mac_lo);
 		snprintf(sc->mac_addr_str, sizeof(sc->mac_addr_str),
-			 "%02x:%02x:%02x:%02x:%02x:%02x",
+			 RTE_ETHER_ADDR_PRT_FMT,
 			 sc->link_params.mac_addr[0],
 			 sc->link_params.mac_addr[1],
 			 sc->link_params.mac_addr[2],
@@ -9655,44 +9658,33 @@ static void bnx2x_init_rte(struct bnx2x_softc *sc)
 void bnx2x_load_firmware(struct bnx2x_softc *sc)
 {
 	const char *fwname;
-	int f;
-	struct stat st;
+	void *buf;
+	size_t bufsz;
 
 	fwname = sc->devinfo.device_id == CHIP_NUM_57711
 		? FW_NAME_57711 : FW_NAME_57810;
-	f = open(fwname, O_RDONLY);
-	if (f < 0) {
+	if (rte_firmware_read(fwname, &buf, &bufsz) != 0) {
 		PMD_DRV_LOG(NOTICE, sc, "Can't open firmware file");
 		return;
 	}
 
-	if (fstat(f, &st) < 0) {
-		PMD_DRV_LOG(NOTICE, sc, "Can't stat firmware file");
-		close(f);
-		return;
-	}
-
-	sc->firmware = rte_zmalloc("bnx2x_fw", st.st_size, RTE_CACHE_LINE_SIZE);
+	sc->firmware = rte_zmalloc("bnx2x_fw", bufsz, RTE_CACHE_LINE_SIZE);
 	if (!sc->firmware) {
 		PMD_DRV_LOG(NOTICE, sc, "Can't allocate memory for firmware");
-		close(f);
-		return;
+		goto out;
 	}
 
-	if (read(f, sc->firmware, st.st_size) != st.st_size) {
-		PMD_DRV_LOG(NOTICE, sc, "Can't read firmware data");
-		close(f);
-		return;
-	}
-	close(f);
-
-	sc->fw_len = st.st_size;
+	sc->fw_len = bufsz;
 	if (sc->fw_len < FW_HEADER_LEN) {
 		PMD_DRV_LOG(NOTICE, sc,
 			    "Invalid fw size: %" PRIu64, sc->fw_len);
-		return;
+		goto out;
 	}
+
+	memcpy(sc->firmware, buf, sc->fw_len);
 	PMD_DRV_LOG(DEBUG, sc, "fw_len = %" PRIu64, sc->fw_len);
+out:
+	free(buf);
 }
 
 static void
@@ -11902,7 +11894,7 @@ void bnx2x_print_device_info(struct bnx2x_softc *sc)
 	PMD_DRV_LOG(INFO, sc, "%12s : %u", "MTU", sc->mtu);
 	PMD_DRV_LOG(INFO, sc,
 		    "%12s : %s", "PHY Type", get_ext_phy_type(ext_phy_type));
-	PMD_DRV_LOG(INFO, sc, "%12s : %x:%x:%x:%x:%x:%x", "MAC Addr",
+	PMD_DRV_LOG(INFO, sc, "%12s : " RTE_ETHER_ADDR_PRT_FMT, "MAC Addr",
 			sc->link_params.mac_addr[0],
 			sc->link_params.mac_addr[1],
 			sc->link_params.mac_addr[2],

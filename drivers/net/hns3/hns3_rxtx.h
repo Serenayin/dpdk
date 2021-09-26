@@ -419,6 +419,7 @@ struct hns3_tx_dfx_stats {
 };
 
 struct hns3_tx_queue {
+	/* The io_tail_reg is write-only if working in tx push mode */
 	volatile void *io_tail_reg;
 	struct hns3_desc *tx_ring;
 	struct hns3_entry *sw_ring;
@@ -659,6 +660,23 @@ hns3_rx_calc_ptype(struct hns3_rx_queue *rxq, const uint32_t l234_info,
 		return ptype_tbl->l3table[l3id] | ptype_tbl->l4table[l4id];
 }
 
+/*
+ * If enable using Tx push feature and also device support it, then use quick
+ * doorbell (bar45) to inform the hardware.
+ *
+ * The other cases (such as: device don't support or user don't enable using)
+ * then use normal doorbell (bar23) to inform the hardware.
+ */
+static inline void
+hns3_write_txq_tail_reg(struct hns3_tx_queue *txq, uint32_t value)
+{
+	rte_io_wmb();
+	if (txq->tx_push_enable)
+		rte_write64_relaxed(rte_cpu_to_le_32(value), txq->io_tail_reg);
+	else
+		rte_write32_relaxed(rte_cpu_to_le_32(value), txq->io_tail_reg);
+}
+
 void hns3_dev_rx_queue_release(void *queue);
 void hns3_dev_tx_queue_release(void *queue);
 void hns3_free_all_queues(struct rte_eth_dev *dev);
@@ -711,6 +729,12 @@ int hns3_tx_burst_mode_get(struct rte_eth_dev *dev,
 const uint32_t *hns3_dev_supported_ptypes_get(struct rte_eth_dev *dev);
 void hns3_init_rx_ptype_tble(struct rte_eth_dev *dev);
 void hns3_set_rxtx_function(struct rte_eth_dev *eth_dev);
+eth_tx_burst_t hns3_get_tx_function(struct rte_eth_dev *dev,
+				    eth_tx_prep_t *prep);
+uint16_t hns3_dummy_rxtx_burst(void *dpdk_txq __rte_unused,
+			       struct rte_mbuf **pkts __rte_unused,
+			       uint16_t pkts_n __rte_unused);
+
 uint32_t hns3_get_tqp_intr_reg_offset(uint16_t tqp_intr_id);
 void hns3_set_queue_intr_gl(struct hns3_hw *hw, uint16_t queue_id,
 			    uint8_t gl_idx, uint16_t gl_value);
@@ -741,5 +765,8 @@ int hns3_tx_done_cleanup(void *txq, uint32_t free_cnt);
 void hns3_enable_rxd_adv_layout(struct hns3_hw *hw);
 int hns3_dev_rx_descriptor_status(void *rx_queue, uint16_t offset);
 int hns3_dev_tx_descriptor_status(void *tx_queue, uint16_t offset);
+void hns3_tx_push_init(struct rte_eth_dev *dev);
+void hns3_stop_tx_datapath(struct rte_eth_dev *dev);
+void hns3_start_tx_datapath(struct rte_eth_dev *dev);
 
 #endif /* _HNS3_RXTX_H_ */

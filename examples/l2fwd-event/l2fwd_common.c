@@ -64,10 +64,12 @@ l2fwd_event_init_ports(struct l2fwd_resources *rsrc)
 		if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_MBUF_FAST_FREE)
 			local_port_conf.txmode.offloads |=
 				DEV_TX_OFFLOAD_MBUF_FAST_FREE;
+		/* Configure RX and TX queue. 8< */
 		ret = rte_eth_dev_configure(port_id, 1, 1, &local_port_conf);
 		if (ret < 0)
 			rte_panic("Cannot configure device: err=%d, port=%u\n",
 				  ret, port_id);
+		/* >8 End of configuration RX and TX queue. */
 
 		ret = rte_eth_dev_adjust_nb_rx_tx_desc(port_id, &nb_rxd,
 						       &nb_txd);
@@ -81,6 +83,7 @@ l2fwd_event_init_ports(struct l2fwd_resources *rsrc)
 		fflush(stdout);
 		rxq_conf = dev_info.default_rxconf;
 		rxq_conf.offloads = local_port_conf.rxmode.offloads;
+		/* Using lcore to poll one or several ports. 8< */
 		ret = rte_eth_rx_queue_setup(port_id, 0, nb_rxd,
 					     rte_eth_dev_socket_id(port_id),
 					     &rxq_conf,
@@ -89,7 +92,9 @@ l2fwd_event_init_ports(struct l2fwd_resources *rsrc)
 			rte_panic("rte_eth_rx_queue_setup:err=%d, port=%u\n",
 				  ret, port_id);
 
-		/* init one TX queue on each port */
+		/* >8 End of using lcore to poll one or several ports. */
+
+		/* Init one TX queue on each port. 8< */
 		fflush(stdout);
 		txq_conf = dev_info.default_txconf;
 		txq_conf.offloads = local_port_conf.txmode.offloads;
@@ -99,17 +104,13 @@ l2fwd_event_init_ports(struct l2fwd_resources *rsrc)
 		if (ret < 0)
 			rte_panic("rte_eth_tx_queue_setup:err=%d, port=%u\n",
 				  ret, port_id);
+		/* >8 End of init one TX queue on each port. */
 
 		rte_eth_promiscuous_enable(port_id);
 
-		printf("Port %u,MAC address: %02X:%02X:%02X:%02X:%02X:%02X\n\n",
+		printf("Port %u,MAC address: " RTE_ETHER_ADDR_PRT_FMT "\n\n",
 			port_id,
-			rsrc->eth_addr[port_id].addr_bytes[0],
-			rsrc->eth_addr[port_id].addr_bytes[1],
-			rsrc->eth_addr[port_id].addr_bytes[2],
-			rsrc->eth_addr[port_id].addr_bytes[3],
-			rsrc->eth_addr[port_id].addr_bytes[4],
-			rsrc->eth_addr[port_id].addr_bytes[5]);
+			RTE_ETHER_ADDR_BYTES(&rsrc->eth_addr[port_id]));
 	}
 
 	return nb_ports_available;

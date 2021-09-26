@@ -69,15 +69,6 @@
 
 #define HINIC_VLAN_FILTER_EN		(1U << 0)
 
-#define HINIC_MTU_TO_PKTLEN(mtu)	\
-	((mtu) + ETH_HLEN + ETH_CRC_LEN)
-
-#define HINIC_PKTLEN_TO_MTU(pktlen)	\
-	((pktlen) - (ETH_HLEN + ETH_CRC_LEN))
-
-/* The max frame size with default MTU */
-#define HINIC_ETH_MAX_LEN (RTE_ETHER_MTU + ETH_HLEN + ETH_CRC_LEN)
-
 /* lro numer limit for one packet */
 #define HINIC_LRO_WQE_NUM_DEFAULT	8
 
@@ -1617,6 +1608,9 @@ static int hinic_vlan_filter_set(struct rte_eth_dev *dev,
 	if (vlan_id > RTE_ETHER_MAX_VLAN_ID)
 		return -EINVAL;
 
+	if (vlan_id == 0)
+		return 0;
+
 	func_id = hinic_global_func_id(nic_dev->hwdev);
 
 	if (enable) {
@@ -2365,10 +2359,8 @@ static int hinic_set_mac_addr(struct rte_eth_dev *dev,
 
 	rte_ether_addr_copy(addr, &nic_dev->default_addr);
 
-	PMD_DRV_LOG(INFO, "Set new mac address %02x:%02x:%02x:%02x:%02x:%02x",
-		    addr->addr_bytes[0], addr->addr_bytes[1],
-		    addr->addr_bytes[2], addr->addr_bytes[3],
-		    addr->addr_bytes[4], addr->addr_bytes[5]);
+	PMD_DRV_LOG(INFO, "Set new mac address " RTE_ETHER_ADDR_PRT_FMT,
+		    RTE_ETHER_ADDR_BYTES(addr));
 
 	return 0;
 }

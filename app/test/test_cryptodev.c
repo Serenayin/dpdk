@@ -16,7 +16,6 @@
 
 #include <rte_crypto.h>
 #include <rte_cryptodev.h>
-#include <rte_cryptodev_pmd.h>
 #include <rte_string_fns.h>
 
 #ifdef RTE_CRYPTO_SCHEDULER
@@ -60,10 +59,6 @@
 
 #define IN_PLACE 0
 #define OUT_OF_PLACE 1
-
-#ifndef ARRAY_SIZE
-#define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
-#endif
 
 static int gbl_driver_id;
 
@@ -135,10 +130,11 @@ setup_test_string(struct rte_mempool *mpool,
 	struct rte_mbuf *m = rte_pktmbuf_alloc(mpool);
 	size_t t_len = len - (blocksize ? (len % blocksize) : 0);
 
-	memset(m->buf_addr, 0, m->buf_len);
 	if (m) {
-		char *dst = rte_pktmbuf_append(m, t_len);
+		char *dst;
 
+		memset(m->buf_addr, 0, m->buf_len);
+		dst = rte_pktmbuf_append(m, t_len);
 		if (!dst) {
 			rte_pktmbuf_free(m);
 			return NULL;
@@ -8736,7 +8732,7 @@ test_PDCP_SDAP_PROTO_encap_all(void)
 	int err, all_err = TEST_SUCCESS;
 	const struct pdcp_sdap_test *cur_test;
 
-	size = ARRAY_SIZE(list_pdcp_sdap_tests);
+	size = RTE_DIM(list_pdcp_sdap_tests);
 
 	for (i = 0; i < size; i++) {
 		cur_test = &list_pdcp_sdap_tests[i];
@@ -8772,13 +8768,57 @@ test_PDCP_SDAP_PROTO_encap_all(void)
 }
 
 static int
+test_PDCP_PROTO_short_mac(void)
+{
+	int i = 0, size = 0;
+	int err, all_err = TEST_SUCCESS;
+	const struct pdcp_short_mac_test *cur_test;
+
+	size = RTE_DIM(list_pdcp_smac_tests);
+
+	for (i = 0; i < size; i++) {
+		cur_test = &list_pdcp_smac_tests[i];
+		err = test_pdcp_proto(
+			i, 0, RTE_CRYPTO_CIPHER_OP_ENCRYPT,
+			RTE_CRYPTO_AUTH_OP_GENERATE, cur_test->data_in,
+			cur_test->in_len, cur_test->data_out,
+			cur_test->in_len + ((cur_test->auth_key) ? 4 : 0),
+			RTE_CRYPTO_CIPHER_NULL, NULL,
+			0, cur_test->param.auth_alg,
+			cur_test->auth_key, cur_test->param.auth_key_len,
+			0, cur_test->param.domain, 0, 0,
+			0, 0, 0);
+		if (err) {
+			printf("\t%d) %s: Short MAC test failed\n",
+					cur_test->test_idx,
+					cur_test->param.name);
+			err = TEST_FAILED;
+		} else {
+			printf("\t%d) %s: Short MAC test PASS\n",
+					cur_test->test_idx,
+					cur_test->param.name);
+			rte_hexdump(stdout, "MAC I",
+				    cur_test->data_out + cur_test->in_len + 2,
+				    2);
+			err = TEST_SUCCESS;
+		}
+		all_err += err;
+	}
+
+	printf("Success: %d, Failure: %d\n", size + all_err, -all_err);
+
+	return (all_err == TEST_SUCCESS) ? TEST_SUCCESS : TEST_FAILED;
+
+}
+
+static int
 test_PDCP_SDAP_PROTO_decap_all(void)
 {
 	int i = 0, size = 0;
 	int err, all_err = TEST_SUCCESS;
 	const struct pdcp_sdap_test *cur_test;
 
-	size = ARRAY_SIZE(list_pdcp_sdap_tests);
+	size = RTE_DIM(list_pdcp_sdap_tests);
 
 	for (i = 0; i < size; i++) {
 		cur_test = &list_pdcp_sdap_tests[i];
@@ -12601,7 +12641,7 @@ test_authenticated_decryption_fail_when_corruption(
 }
 
 static int
-test_authenticated_encryt_with_esn(
+test_authenticated_encrypt_with_esn(
 		struct crypto_testsuite_params *ts_params,
 		struct crypto_unittest_params *ut_params,
 		const struct test_crypto_vector *reference)
@@ -13388,7 +13428,7 @@ auth_decryption_AES128CBC_HMAC_SHA1_fail_tag_corrupt(void)
 static int
 auth_encrypt_AES128CBC_HMAC_SHA1_esn_check(void)
 {
-	return test_authenticated_encryt_with_esn(
+	return test_authenticated_encrypt_with_esn(
 			&testsuite_params,
 			&unittest_params,
 			&aes128cbc_hmac_sha1_aad_test_vector);
@@ -13474,35 +13514,36 @@ scheduler_testsuite_setup(void)
 }
 
 static int
-test_scheduler_attach_slave_op(void)
+test_scheduler_attach_worker_op(void)
 {
 	struct crypto_testsuite_params *ts_params = &testsuite_params;
 	uint8_t sched_id = ts_params->valid_devs[0];
-	uint32_t nb_devs, i, nb_devs_attached = 0;
+	uint32_t i, nb_devs_attached = 0;
 	int ret;
 	char vdev_name[32];
+	unsigned int count = rte_cryptodev_count();
 
-	/* create 2 AESNI_MB if necessary */
-	nb_devs = rte_cryptodev_device_count_by_driver(
-			rte_cryptodev_driver_id_get(
-			RTE_STR(CRYPTODEV_NAME_AESNI_MB_PMD)));
-	if (nb_devs < 2) {
-		for (i = nb_devs; i < 2; i++) {
-			snprintf(vdev_name, sizeof(vdev_name), "%s_%u",
-					RTE_STR(CRYPTODEV_NAME_AESNI_MB_PMD),
-					i);
-			ret = rte_vdev_init(vdev_name, NULL);
+	/* create 2 AESNI_MB vdevs on top of existing devices */
+	for (i = count; i < count + 2; i++) {
+		snprintf(vdev_name, sizeof(vdev_name), "%s_%u",
+				RTE_STR(CRYPTODEV_NAME_AESNI_MB_PMD),
+				i);
+		ret = rte_vdev_init(vdev_name, NULL);
 
-			TEST_ASSERT(ret == 0,
-				"Failed to create instance %u of"
-				" pmd : %s",
-				i, RTE_STR(CRYPTODEV_NAME_AESNI_MB_PMD));
+		TEST_ASSERT(ret == 0,
+			"Failed to create instance %u of"
+			" pmd : %s",
+			i, RTE_STR(CRYPTODEV_NAME_AESNI_MB_PMD));
+
+		if (ret < 0) {
+			RTE_LOG(ERR, USER1,
+				"Failed to create 2 AESNI MB PMDs.\n");
+			return TEST_SKIPPED;
 		}
 	}
 
 	/* attach 2 AESNI_MB cdevs */
-	for (i = 0; i < rte_cryptodev_count() && nb_devs_attached < 2;
-			i++) {
+	for (i = count; i < count + 2; i++) {
 		struct rte_cryptodev_info info;
 		unsigned int session_size;
 
@@ -13584,7 +13625,7 @@ test_scheduler_attach_slave_op(void)
 }
 
 static int
-test_scheduler_detach_slave_op(void)
+test_scheduler_detach_worker_op(void)
 {
 	struct crypto_testsuite_params *ts_params = &testsuite_params;
 	uint8_t sched_id = ts_params->valid_devs[0];
@@ -13650,7 +13691,7 @@ test_scheduler_mode_pkt_size_distr_op(void)
 static int
 scheduler_multicore_testsuite_setup(void)
 {
-	if (test_scheduler_attach_slave_op() < 0)
+	if (test_scheduler_attach_worker_op() < 0)
 		return TEST_SKIPPED;
 	if (test_scheduler_mode_op(CDEV_SCHED_MODE_MULTICORE) < 0)
 		return TEST_SKIPPED;
@@ -13660,7 +13701,7 @@ scheduler_multicore_testsuite_setup(void)
 static int
 scheduler_roundrobin_testsuite_setup(void)
 {
-	if (test_scheduler_attach_slave_op() < 0)
+	if (test_scheduler_attach_worker_op() < 0)
 		return TEST_SKIPPED;
 	if (test_scheduler_mode_op(CDEV_SCHED_MODE_ROUNDROBIN) < 0)
 		return TEST_SKIPPED;
@@ -13670,7 +13711,7 @@ scheduler_roundrobin_testsuite_setup(void)
 static int
 scheduler_failover_testsuite_setup(void)
 {
-	if (test_scheduler_attach_slave_op() < 0)
+	if (test_scheduler_attach_worker_op() < 0)
 		return TEST_SKIPPED;
 	if (test_scheduler_mode_op(CDEV_SCHED_MODE_FAILOVER) < 0)
 		return TEST_SKIPPED;
@@ -13680,7 +13721,7 @@ scheduler_failover_testsuite_setup(void)
 static int
 scheduler_pkt_size_distr_testsuite_setup(void)
 {
-	if (test_scheduler_attach_slave_op() < 0)
+	if (test_scheduler_attach_worker_op() < 0)
 		return TEST_SKIPPED;
 	if (test_scheduler_mode_op(CDEV_SCHED_MODE_PKT_SIZE_DISTR) < 0)
 		return TEST_SKIPPED;
@@ -13690,7 +13731,7 @@ scheduler_pkt_size_distr_testsuite_setup(void)
 static void
 scheduler_mode_testsuite_teardown(void)
 {
-	test_scheduler_detach_slave_op();
+	test_scheduler_detach_worker_op();
 }
 
 #endif /* RTE_CRYPTO_SCHEDULER */
@@ -14043,6 +14084,8 @@ static struct unit_test_suite cryptodev_snow3g_testsuite  = {
 			test_snow3g_encryption_test_case_5),
 
 		TEST_CASE_ST(ut_setup, ut_teardown,
+			test_PDCP_PROTO_short_mac),
+		TEST_CASE_ST(ut_setup, ut_teardown,
 			test_snow3g_encryption_test_case_1_oop),
 		TEST_CASE_ST(ut_setup, ut_teardown,
 			test_snow3g_encryption_test_case_1_oop_sgl),
@@ -14283,6 +14326,8 @@ static struct unit_test_suite cryptodev_kasumi_testsuite  = {
 			test_kasumi_decryption_test_case_1_oop),
 
 		TEST_CASE_ST(ut_setup, ut_teardown,
+			test_PDCP_PROTO_short_mac),
+		TEST_CASE_ST(ut_setup, ut_teardown,
 			test_kasumi_cipher_auth_test_case_1),
 
 		/** KASUMI generate auth, then encrypt (F8) */
@@ -14521,19 +14566,54 @@ run_cryptodev_testsuite(const char *pmd_name)
 }
 
 static int
-test_cryptodev_qat(void /*argv __rte_unused, int argc __rte_unused*/)
+require_feature_flag(const char *pmd_name, uint64_t flag, const char *flag_name)
+{
+	struct rte_cryptodev_info dev_info;
+	uint8_t i, nb_devs;
+	int driver_id;
+
+	driver_id = rte_cryptodev_driver_id_get(pmd_name);
+	if (driver_id == -1) {
+		RTE_LOG(WARNING, USER1, "%s PMD must be loaded.\n", pmd_name);
+		return TEST_SKIPPED;
+	}
+
+	nb_devs = rte_cryptodev_count();
+	if (nb_devs < 1) {
+		RTE_LOG(WARNING, USER1, "No crypto devices found?\n");
+		return TEST_SKIPPED;
+	}
+
+	for (i = 0; i < nb_devs; i++) {
+		rte_cryptodev_info_get(i, &dev_info);
+		if (dev_info.driver_id == driver_id) {
+			if (!(dev_info.feature_flags & flag)) {
+				RTE_LOG(INFO, USER1, "%s not supported\n",
+						flag_name);
+				return TEST_SKIPPED;
+			}
+			return 0; /* found */
+		}
+	}
+
+	RTE_LOG(INFO, USER1, "%s not supported\n", flag_name);
+	return TEST_SKIPPED;
+}
+
+static int
+test_cryptodev_qat(void)
 {
 	return run_cryptodev_testsuite(RTE_STR(CRYPTODEV_NAME_QAT_SYM_PMD));
 }
 
 static int
-test_cryptodev_virtio(void /*argv __rte_unused, int argc __rte_unused*/)
+test_cryptodev_virtio(void)
 {
 	return run_cryptodev_testsuite(RTE_STR(CRYPTODEV_NAME_VIRTIO_PMD));
 }
 
 static int
-test_cryptodev_aesni_mb(void /*argv __rte_unused, int argc __rte_unused*/)
+test_cryptodev_aesni_mb(void)
 {
 	return run_cryptodev_testsuite(RTE_STR(CRYPTODEV_NAME_AESNI_MB_PMD));
 }
@@ -14573,25 +14653,31 @@ test_cryptodev_cpu_aesni_gcm(void)
 }
 
 static int
+test_cryptodev_mlx5(void)
+{
+	return run_cryptodev_testsuite(RTE_STR(CRYPTODEV_NAME_MLX5_PMD));
+}
+
+static int
 test_cryptodev_null(void)
 {
 	return run_cryptodev_testsuite(RTE_STR(CRYPTODEV_NAME_NULL_PMD));
 }
 
 static int
-test_cryptodev_sw_snow3g(void /*argv __rte_unused, int argc __rte_unused*/)
+test_cryptodev_sw_snow3g(void)
 {
 	return run_cryptodev_testsuite(RTE_STR(CRYPTODEV_NAME_SNOW3G_PMD));
 }
 
 static int
-test_cryptodev_sw_kasumi(void /*argv __rte_unused, int argc __rte_unused*/)
+test_cryptodev_sw_kasumi(void)
 {
 	return run_cryptodev_testsuite(RTE_STR(CRYPTODEV_NAME_KASUMI_PMD));
 }
 
 static int
-test_cryptodev_sw_zuc(void /*argv __rte_unused, int argc __rte_unused*/)
+test_cryptodev_sw_zuc(void)
 {
 	return run_cryptodev_testsuite(RTE_STR(CRYPTODEV_NAME_ZUC_PMD));
 }
@@ -14611,7 +14697,7 @@ test_cryptodev_mrvl(void)
 #ifdef RTE_CRYPTO_SCHEDULER
 
 static int
-test_cryptodev_scheduler(void /*argv __rte_unused, int argc __rte_unused*/)
+test_cryptodev_scheduler(void)
 {
 	uint8_t ret, sched_i, j, i = 0, blk_start_idx = 0;
 	const enum blockcipher_test_type blk_suites[] = {
@@ -14652,12 +14738,12 @@ test_cryptodev_scheduler(void /*argv __rte_unused, int argc __rte_unused*/)
 	static struct unit_test_suite scheduler_config = {
 		.suite_name = "Crypto Device Scheduler Config Unit Test Suite",
 		.unit_test_cases = {
-			TEST_CASE(test_scheduler_attach_slave_op),
+			TEST_CASE(test_scheduler_attach_worker_op),
 			TEST_CASE(test_scheduler_mode_multicore_op),
 			TEST_CASE(test_scheduler_mode_roundrobin_op),
 			TEST_CASE(test_scheduler_mode_failover_op),
 			TEST_CASE(test_scheduler_mode_pkt_size_distr_op),
-			TEST_CASE(test_scheduler_detach_slave_op),
+			TEST_CASE(test_scheduler_detach_worker_op),
 
 			TEST_CASES_END() /**< NULL terminate array */
 		}
@@ -14719,13 +14805,13 @@ REGISTER_TEST_COMMAND(cryptodev_scheduler_autotest, test_cryptodev_scheduler);
 #endif
 
 static int
-test_cryptodev_dpaa2_sec(void /*argv __rte_unused, int argc __rte_unused*/)
+test_cryptodev_dpaa2_sec(void)
 {
 	return run_cryptodev_testsuite(RTE_STR(CRYPTODEV_NAME_DPAA2_SEC_PMD));
 }
 
 static int
-test_cryptodev_dpaa_sec(void /*argv __rte_unused, int argc __rte_unused*/)
+test_cryptodev_dpaa_sec(void)
 {
 	return run_cryptodev_testsuite(RTE_STR(CRYPTODEV_NAME_DPAA_SEC_PMD));
 }
@@ -14749,7 +14835,7 @@ test_cryptodev_octeontx2(void)
 }
 
 static int
-test_cryptodev_caam_jr(void /*argv __rte_unused, int argc __rte_unused*/)
+test_cryptodev_caam_jr(void)
 {
 	return run_cryptodev_testsuite(RTE_STR(CRYPTODEV_NAME_CAAM_JR_PMD));
 }
@@ -14767,15 +14853,33 @@ test_cryptodev_bcmfs(void)
 }
 
 static int
-test_cryptodev_qat_raw_api(void /*argv __rte_unused, int argc __rte_unused*/)
+test_cryptodev_qat_raw_api(void)
 {
+	static const char *pmd_name = RTE_STR(CRYPTODEV_NAME_QAT_SYM_PMD);
 	int ret;
 
+	ret = require_feature_flag(pmd_name, RTE_CRYPTODEV_FF_SYM_RAW_DP,
+			"RAW API");
+	if (ret)
+		return ret;
+
 	global_api_test_type = CRYPTODEV_RAW_API_TEST;
-	ret = run_cryptodev_testsuite(RTE_STR(CRYPTODEV_NAME_QAT_SYM_PMD));
+	ret = run_cryptodev_testsuite(pmd_name);
 	global_api_test_type = CRYPTODEV_API_TEST;
 
 	return ret;
+}
+
+static int
+test_cryptodev_cn9k(void)
+{
+	return run_cryptodev_testsuite(RTE_STR(CRYPTODEV_NAME_CN9K_PMD));
+}
+
+static int
+test_cryptodev_cn10k(void)
+{
+	return run_cryptodev_testsuite(RTE_STR(CRYPTODEV_NAME_CN10K_PMD));
 }
 
 REGISTER_TEST_COMMAND(cryptodev_qat_raw_api_autotest,
@@ -14788,6 +14892,7 @@ REGISTER_TEST_COMMAND(cryptodev_openssl_autotest, test_cryptodev_openssl);
 REGISTER_TEST_COMMAND(cryptodev_aesni_gcm_autotest, test_cryptodev_aesni_gcm);
 REGISTER_TEST_COMMAND(cryptodev_cpu_aesni_gcm_autotest,
 	test_cryptodev_cpu_aesni_gcm);
+REGISTER_TEST_COMMAND(cryptodev_mlx5_autotest, test_cryptodev_mlx5);
 REGISTER_TEST_COMMAND(cryptodev_null_autotest, test_cryptodev_null);
 REGISTER_TEST_COMMAND(cryptodev_sw_snow3g_autotest, test_cryptodev_sw_snow3g);
 REGISTER_TEST_COMMAND(cryptodev_sw_kasumi_autotest, test_cryptodev_sw_kasumi);
@@ -14803,3 +14908,5 @@ REGISTER_TEST_COMMAND(cryptodev_octeontx2_autotest, test_cryptodev_octeontx2);
 REGISTER_TEST_COMMAND(cryptodev_caam_jr_autotest, test_cryptodev_caam_jr);
 REGISTER_TEST_COMMAND(cryptodev_nitrox_autotest, test_cryptodev_nitrox);
 REGISTER_TEST_COMMAND(cryptodev_bcmfs_autotest, test_cryptodev_bcmfs);
+REGISTER_TEST_COMMAND(cryptodev_cn9k_autotest, test_cryptodev_cn9k);
+REGISTER_TEST_COMMAND(cryptodev_cn10k_autotest, test_cryptodev_cn10k);

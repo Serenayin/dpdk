@@ -33,6 +33,7 @@
 #include "virtio_logs.h"
 #include "virtqueue.h"
 #include "virtio_rxtx.h"
+#include "virtio_rxtx_simple.h"
 #include "virtio_user/virtio_user_dev.h"
 
 static int  virtio_dev_configure(struct rte_eth_dev *dev);
@@ -631,6 +632,7 @@ free_mz:
 	rte_memzone_free(mz);
 free_vq:
 	rte_free(vq);
+	hw->vqs[queue_idx] = NULL;
 
 	return ret;
 }
@@ -841,6 +843,56 @@ virtio_dev_allmulticast_disable(struct rte_eth_dev *dev)
 	return 0;
 }
 
+uint16_t
+virtio_rx_mem_pool_buf_size(struct rte_mempool *mp)
+{
+	return rte_pktmbuf_data_room_size(mp) - RTE_PKTMBUF_HEADROOM;
+}
+
+bool
+virtio_rx_check_scatter(uint16_t max_rx_pkt_len, uint16_t rx_buf_size,
+			bool rx_scatter_enabled, const char **error)
+{
+	if (!rx_scatter_enabled && max_rx_pkt_len > rx_buf_size) {
+		*error = "Rx scatter is disabled and RxQ mbuf pool object size is too small";
+		return false;
+	}
+
+	return true;
+}
+
+static bool
+virtio_check_scatter_on_all_rx_queues(struct rte_eth_dev *dev,
+				      uint16_t frame_size)
+{
+	struct virtio_hw *hw = dev->data->dev_private;
+	struct virtnet_rx *rxvq;
+	struct virtqueue *vq;
+	unsigned int qidx;
+	uint16_t buf_size;
+	const char *error;
+
+	if (hw->vqs == NULL)
+		return true;
+
+	for (qidx = 0; (vq = hw->vqs[2 * qidx + VTNET_SQ_RQ_QUEUE_IDX]) != NULL;
+	     qidx++) {
+		rxvq = &vq->rxq;
+		if (rxvq->mpool == NULL)
+			continue;
+		buf_size = virtio_rx_mem_pool_buf_size(rxvq->mpool);
+
+		if (!virtio_rx_check_scatter(frame_size, buf_size,
+					     hw->rx_ol_scatter, &error)) {
+			PMD_INIT_LOG(ERR, "MTU check for RxQ %u failed: %s",
+				     qidx, error);
+			return false;
+		}
+	}
+
+	return true;
+}
+
 #define VLAN_TAG_LEN           4    /* 802.3ac tag (not DMA'd) */
 static int
 virtio_mtu_set(struct rte_eth_dev *dev, uint16_t mtu)
@@ -858,6 +910,15 @@ virtio_mtu_set(struct rte_eth_dev *dev, uint16_t mtu)
 			RTE_ETHER_MIN_MTU, max_frame_size - ether_hdr_len);
 		return -EINVAL;
 	}
+
+	if (!virtio_check_scatter_on_all_rx_queues(dev, frame_size)) {
+		PMD_INIT_LOG(ERR, "MTU vs Rx scatter and Rx buffers check failed");
+		return -EINVAL;
+	}
+
+	hw->max_rx_pkt_len = frame_size;
+	dev->data->dev_conf.rxmode.max_rx_pkt_len = hw->max_rx_pkt_len;
+
 	return 0;
 }
 
@@ -1625,13 +1686,15 @@ virtio_configure_intr(struct rte_eth_dev *dev)
 		}
 	}
 
-	/* Re-register callback to update max_intr */
-	rte_intr_callback_unregister(dev->intr_handle,
-				     virtio_interrupt_handler,
-				     dev);
-	rte_intr_callback_register(dev->intr_handle,
-				   virtio_interrupt_handler,
-				   dev);
+	if (dev->data->dev_flags & RTE_ETH_DEV_INTR_LSC) {
+		/* Re-register callback to update max_intr */
+		rte_intr_callback_unregister(dev->intr_handle,
+					     virtio_interrupt_handler,
+					     dev);
+		rte_intr_callback_register(dev->intr_handle,
+					   virtio_interrupt_handler,
+					   dev);
+	}
 
 	/* DO NOT try to remove this! This function will enable msix, or QEMU
 	 * will encounter SIGSEGV when DRIVER_OK is sent.
@@ -1700,7 +1763,7 @@ virtio_init_device(struct rte_eth_dev *eth_dev, uint64_t req_features)
 	rte_ether_addr_copy((struct rte_ether_addr *)hw->mac_addr,
 			&eth_dev->data->mac_addrs[0]);
 	PMD_INIT_LOG(DEBUG,
-		     "PORT MAC: %02X:%02X:%02X:%02X:%02X:%02X",
+		     "PORT MAC: " RTE_ETHER_ADDR_PRT_FMT,
 		     hw->mac_addr[0], hw->mac_addr[1], hw->mac_addr[2],
 		     hw->mac_addr[3], hw->mac_addr[4], hw->mac_addr[5]);
 
@@ -1781,7 +1844,7 @@ virtio_init_device(struct rte_eth_dev *eth_dev, uint64_t req_features)
 				config->max_virtqueue_pairs);
 		PMD_INIT_LOG(DEBUG, "config->status=%d", config->status);
 		PMD_INIT_LOG(DEBUG,
-				"PORT MAC: %02X:%02X:%02X:%02X:%02X:%02X",
+				"PORT MAC: " RTE_ETHER_ADDR_PRT_FMT,
 				config->mac[0], config->mac[1],
 				config->mac[2], config->mac[3],
 				config->mac[4], config->mac[5]);
@@ -1842,6 +1905,7 @@ eth_virtio_dev_init(struct rte_eth_dev *eth_dev)
 	if (ret < 0)
 		return ret;
 	hw->speed = speed;
+	hw->duplex = DUPLEX_UNKNOWN;
 
 	/* Allocate memory for storing MAC addresses */
 	eth_dev->data->mac_addrs = rte_zmalloc("virtio",
@@ -2039,8 +2103,14 @@ virtio_dev_configure(struct rte_eth_dev *dev)
 			return ret;
 	}
 
-	if (rxmode->max_rx_pkt_len > hw->max_mtu + ether_hdr_len)
+	if ((rx_offloads & DEV_RX_OFFLOAD_JUMBO_FRAME) &&
+	    (rxmode->max_rx_pkt_len > hw->max_mtu + ether_hdr_len))
 		req_features &= ~(1ULL << VIRTIO_NET_F_MTU);
+
+	if (rx_offloads & DEV_RX_OFFLOAD_JUMBO_FRAME)
+		hw->max_rx_pkt_len = rxmode->max_rx_pkt_len;
+	else
+		hw->max_rx_pkt_len = ether_hdr_len + dev->data->mtu;
 
 	if (rx_offloads & (DEV_RX_OFFLOAD_UDP_CKSUM |
 			   DEV_RX_OFFLOAD_TCP_CKSUM))
@@ -2089,6 +2159,8 @@ virtio_dev_configure(struct rte_eth_dev *dev)
 
 	if (rx_offloads & DEV_RX_OFFLOAD_VLAN_STRIP)
 		hw->vlan_strip = 1;
+
+	hw->rx_ol_scatter = (rx_offloads & DEV_RX_OFFLOAD_SCATTER);
 
 	if ((rx_offloads & DEV_RX_OFFLOAD_VLAN_FILTER) &&
 			!virtio_with_feature(hw, VIRTIO_NET_F_CTRL_VLAN)) {
@@ -2441,10 +2513,13 @@ virtio_dev_info_get(struct rte_eth_dev *dev, struct rte_eth_dev_info *dev_info)
 	dev_info->min_rx_bufsize = VIRTIO_MIN_RX_BUFSIZE;
 	dev_info->max_rx_pktlen = VIRTIO_MAX_RX_PKTLEN;
 	dev_info->max_mac_addrs = VIRTIO_MAX_MAC_ADDRS;
+	dev_info->max_mtu = hw->max_mtu;
 
 	host_features = VIRTIO_OPS(hw)->get_features(hw);
 	dev_info->rx_offload_capa = DEV_RX_OFFLOAD_VLAN_STRIP;
 	dev_info->rx_offload_capa |= DEV_RX_OFFLOAD_JUMBO_FRAME;
+	if (host_features & (1ULL << VIRTIO_NET_F_MRG_RXBUF))
+		dev_info->rx_offload_capa |= DEV_RX_OFFLOAD_SCATTER;
 	if (host_features & (1ULL << VIRTIO_NET_F_GUEST_CSUM)) {
 		dev_info->rx_offload_capa |=
 			DEV_RX_OFFLOAD_TCP_CKSUM |
@@ -2468,6 +2543,30 @@ virtio_dev_info_get(struct rte_eth_dev *dev, struct rte_eth_dev_info *dev_info)
 		(1ULL << VIRTIO_NET_F_HOST_TSO6);
 	if ((host_features & tso_mask) == tso_mask)
 		dev_info->tx_offload_capa |= DEV_TX_OFFLOAD_TCP_TSO;
+
+	if (host_features & (1ULL << VIRTIO_F_RING_PACKED)) {
+		/*
+		 * According to 2.7 Packed Virtqueues,
+		 * 2.7.10.1 Structure Size and Alignment:
+		 * The Queue Size value does not have to be a power of 2.
+		 */
+		dev_info->rx_desc_lim.nb_max = UINT16_MAX;
+	} else {
+		/*
+		 * According to 2.6 Split Virtqueues:
+		 * Queue Size value is always a power of 2. The maximum Queue
+		 * Size value is 32768.
+		 */
+		dev_info->rx_desc_lim.nb_max = 32768;
+	}
+	/*
+	 * Actual minimum is not the same for virtqueues of different kinds,
+	 * but to avoid tangling the code with separate branches, rely on
+	 * default thresholds since desc number must be at least of their size.
+	 */
+	dev_info->rx_desc_lim.nb_min = RTE_MAX(DEFAULT_RX_FREE_THRESH,
+					       RTE_VIRTIO_VPMD_RX_REARM_THRESH);
+	dev_info->rx_desc_lim.nb_align = 1;
 
 	return 0;
 }

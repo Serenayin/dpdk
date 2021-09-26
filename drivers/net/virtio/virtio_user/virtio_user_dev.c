@@ -260,21 +260,84 @@ err:
 	return -1;
 }
 
-static inline void
-parse_mac(struct virtio_user_dev *dev, const char *mac)
+int
+virtio_user_dev_set_mac(struct virtio_user_dev *dev)
 {
-	struct rte_ether_addr tmp;
+	int ret = 0;
 
-	if (!mac)
-		return;
+	if (!(dev->device_features & (1ULL << VIRTIO_NET_F_MAC)))
+		return -ENOTSUP;
 
-	if (rte_ether_unformat_addr(mac, &tmp) == 0) {
-		memcpy(dev->mac_addr, &tmp, RTE_ETHER_ADDR_LEN);
+	if (!dev->ops->set_config)
+		return -ENOTSUP;
+
+	ret = dev->ops->set_config(dev, dev->mac_addr,
+			offsetof(struct virtio_net_config, mac),
+			RTE_ETHER_ADDR_LEN);
+	if (ret)
+		PMD_DRV_LOG(ERR, "(%s) Failed to set MAC address in device", dev->path);
+
+	return ret;
+}
+
+int
+virtio_user_dev_get_mac(struct virtio_user_dev *dev)
+{
+	int ret = 0;
+
+	if (!(dev->device_features & (1ULL << VIRTIO_NET_F_MAC)))
+		return -ENOTSUP;
+
+	if (!dev->ops->get_config)
+		return -ENOTSUP;
+
+	ret = dev->ops->get_config(dev, dev->mac_addr,
+			offsetof(struct virtio_net_config, mac),
+			RTE_ETHER_ADDR_LEN);
+	if (ret)
+		PMD_DRV_LOG(ERR, "(%s) Failed to get MAC address from device", dev->path);
+
+	return ret;
+}
+
+static void
+virtio_user_dev_init_mac(struct virtio_user_dev *dev, const char *mac)
+{
+	struct rte_ether_addr cmdline_mac;
+	char buf[RTE_ETHER_ADDR_FMT_SIZE];
+	int ret;
+
+	if (mac && rte_ether_unformat_addr(mac, &cmdline_mac) == 0) {
+		/*
+		 * MAC address was passed from command-line, try to store
+		 * it in the device if it supports it. Otherwise try to use
+		 * the device one.
+		 */
+		memcpy(dev->mac_addr, &cmdline_mac, RTE_ETHER_ADDR_LEN);
 		dev->mac_specified = 1;
+
+		/* Setting MAC may fail, continue to get the device one in this case */
+		virtio_user_dev_set_mac(dev);
+		ret = virtio_user_dev_get_mac(dev);
+		if (ret == -ENOTSUP)
+			goto out;
+
+		if (memcmp(&cmdline_mac, dev->mac_addr, RTE_ETHER_ADDR_LEN))
+			PMD_DRV_LOG(INFO, "(%s) Device MAC update failed", dev->path);
 	} else {
-		/* ignore the wrong mac, use random mac */
-		PMD_DRV_LOG(ERR, "wrong format of mac: %s", mac);
+		ret = virtio_user_dev_get_mac(dev);
+		if (ret) {
+			PMD_DRV_LOG(ERR, "(%s) No valid MAC in devargs or device, use random",
+					dev->path);
+			return;
+		}
+
+		dev->mac_specified = 1;
 	}
+out:
+	rte_ether_format_addr(buf, RTE_ETHER_ADDR_FMT_SIZE,
+			(struct rte_ether_addr *)dev->mac_addr);
+	PMD_DRV_LOG(INFO, "(%s) MAC %s specified", dev->path, buf);
 }
 
 static int
@@ -353,7 +416,7 @@ virtio_user_fill_intr_handle(struct virtio_user_dev *dev)
 	}
 
 	for (i = 0; i < dev->max_queue_pairs; ++i)
-		eth_dev->intr_handle->efds[i] = dev->callfds[i];
+		eth_dev->intr_handle->efds[i] = dev->callfds[2 * i];
 	eth_dev->intr_handle->nb_efd = dev->max_queue_pairs;
 	eth_dev->intr_handle->max_intr = dev->max_queue_pairs + 1;
 	eth_dev->intr_handle->type = RTE_INTR_HANDLE_VDEV;
@@ -509,8 +572,6 @@ virtio_user_dev_init(struct virtio_user_dev *dev, char *path, int queues,
 	dev->unsupported_features = 0;
 	dev->backend_type = backend_type;
 
-	parse_mac(dev, mac);
-
 	if (*ifname) {
 		dev->ifname = *ifname;
 		*ifname = NULL;
@@ -537,6 +598,8 @@ virtio_user_dev_init(struct virtio_user_dev *dev, char *path, int queues,
 		PMD_INIT_LOG(ERR, "(%s) Failed to get device features", dev->path);
 		return -1;
 	}
+
+	virtio_user_dev_init_mac(dev, mac);
 
 	if (!mrg_rxbuf)
 		dev->unsupported_features |= (1ull << VIRTIO_NET_F_MRG_RXBUF);
@@ -573,11 +636,7 @@ virtio_user_dev_init(struct virtio_user_dev *dev, char *path, int queues,
 	if (dev->backend_type == VIRTIO_USER_BACKEND_VHOST_USER)
 		dev->frontend_features |= (1ull << VIRTIO_NET_F_STATUS);
 
-	/*
-	 * Device features =
-	 *     (frontend_features | backend_features) & ~unsupported_features;
-	 */
-	dev->device_features |= dev->frontend_features;
+	dev->frontend_features &= ~dev->unsupported_features;
 	dev->device_features &= ~dev->unsupported_features;
 
 	if (rte_mem_event_callback_register(VIRTIO_USER_MEM_EVENT_CLB_NAME,
@@ -595,6 +654,13 @@ virtio_user_dev_init(struct virtio_user_dev *dev, char *path, int queues,
 void
 virtio_user_dev_uninit(struct virtio_user_dev *dev)
 {
+	struct rte_eth_dev *eth_dev = &rte_eth_devices[dev->hw.port_id];
+
+	if (eth_dev->intr_handle) {
+		free(eth_dev->intr_handle);
+		eth_dev->intr_handle = NULL;
+	}
+
 	virtio_user_stop_device(dev);
 
 	rte_mem_event_callback_unregister(VIRTIO_USER_MEM_EVENT_CLB_NAME, dev);
@@ -980,12 +1046,10 @@ virtio_user_dev_server_reconnect(struct virtio_user_dev *dev)
 		return -1;
 	}
 
-	dev->device_features |= dev->frontend_features;
-
 	/* unmask vhost-user unsupported features */
 	dev->device_features &= ~(dev->unsupported_features);
 
-	dev->features &= dev->device_features;
+	dev->features &= (dev->device_features | dev->frontend_features);
 
 	/* For packed ring, resetting queues is required in reconnection. */
 	if (virtio_with_packed_queue(hw) &&

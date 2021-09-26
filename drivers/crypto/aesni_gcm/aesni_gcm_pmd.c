@@ -5,7 +5,7 @@
 #include <rte_common.h>
 #include <rte_hexdump.h>
 #include <rte_cryptodev.h>
-#include <rte_cryptodev_pmd.h>
+#include <cryptodev_pmd.h>
 #include <rte_bus_vdev.h>
 #include <rte_malloc.h>
 #include <rte_cpuflags.h>
@@ -842,8 +842,14 @@ aesni_gcm_create(const char *name,
 		init_mb_mgr_avx2(mb_mgr);
 		break;
 	case RTE_AESNI_GCM_AVX512:
-		dev->feature_flags |= RTE_CRYPTODEV_FF_CPU_AVX512;
-		init_mb_mgr_avx512(mb_mgr);
+		if (rte_cpu_get_flag_enabled(RTE_CPUFLAG_VAES)) {
+			dev->feature_flags |= RTE_CRYPTODEV_FF_CPU_AVX512;
+			init_mb_mgr_avx512(mb_mgr);
+		} else {
+			dev->feature_flags |= RTE_CRYPTODEV_FF_CPU_AVX2;
+			init_mb_mgr_avx2(mb_mgr);
+			vector_mode = RTE_AESNI_GCM_AVX2;
+		}
 		break;
 	default:
 		AESNI_GCM_LOG(ERR, "Unsupported vector mode %u\n", vector_mode);

@@ -40,6 +40,7 @@
 static struct rte_lpm *ipv4_l3fwd_lpm_lookup_struct[NB_SOCKETS];
 static struct rte_lpm6 *ipv6_l3fwd_lpm_lookup_struct[NB_SOCKETS];
 
+/* Performing LPM-based lookups. 8< */
 static inline uint16_t
 lpm_get_ipv4_dst_port(const struct rte_ipv4_hdr *ipv4_hdr,
 		      uint16_t portid,
@@ -53,6 +54,7 @@ lpm_get_ipv4_dst_port(const struct rte_ipv4_hdr *ipv4_hdr,
 	else
 		return portid;
 }
+/* >8 End of performing LPM-based lookups. */
 
 static inline uint16_t
 lpm_get_ipv6_dst_port(const struct rte_ipv6_hdr *ipv6_hdr,
@@ -154,14 +156,16 @@ lpm_main_loop(__rte_unused void *dummy)
 	lcore_id = rte_lcore_id();
 	qconf = &lcore_conf[lcore_id];
 
-	if (qconf->n_rx_queue == 0) {
+	const uint16_t n_rx_q = qconf->n_rx_queue;
+	const uint16_t n_tx_p = qconf->n_tx_port;
+	if (n_rx_q == 0) {
 		RTE_LOG(INFO, L3FWD, "lcore %u has nothing to do\n", lcore_id);
 		return 0;
 	}
 
 	RTE_LOG(INFO, L3FWD, "entering main loop on lcore %u\n", lcore_id);
 
-	for (i = 0; i < qconf->n_rx_queue; i++) {
+	for (i = 0; i < n_rx_q; i++) {
 
 		portid = qconf->rx_queue_list[i].port_id;
 		queueid = qconf->rx_queue_list[i].queue_id;
@@ -181,7 +185,7 @@ lpm_main_loop(__rte_unused void *dummy)
 		diff_tsc = cur_tsc - prev_tsc;
 		if (unlikely(diff_tsc > drain_tsc)) {
 
-			for (i = 0; i < qconf->n_tx_port; ++i) {
+			for (i = 0; i < n_tx_p; ++i) {
 				portid = qconf->tx_port_id[i];
 				if (qconf->tx_mbufs[portid].len == 0)
 					continue;
@@ -197,7 +201,7 @@ lpm_main_loop(__rte_unused void *dummy)
 		/*
 		 * Read packet from RX queues
 		 */
-		for (i = 0; i < qconf->n_rx_queue; ++i) {
+		for (i = 0; i < n_rx_q; ++i) {
 			portid = qconf->rx_queue_list[i].port_id;
 			queueid = qconf->rx_queue_list[i].queue_id;
 			nb_rx = rte_eth_rx_burst(portid, queueid, pkts_burst,

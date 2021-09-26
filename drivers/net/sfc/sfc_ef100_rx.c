@@ -119,6 +119,7 @@ sfc_ef100_rx_qpush(struct sfc_ef100_rxq *rxq, unsigned int added)
 	 * operations that follow it (i.e. doorbell write).
 	 */
 	rte_write32(dword.ed_u32[0], rxq->doorbell);
+	rxq->dp.dpq.rx_dbells++;
 
 	sfc_ef100_rx_debug(rxq, "RxQ pushed doorbell at pidx %u (added=%u)",
 			   EFX_DWORD_FIELD(dword, ERF_GZ_RX_RING_PIDX),
@@ -211,7 +212,7 @@ sfc_ef100_rx_tun_outer_l4_csum(const efx_word_t class)
 	return EFX_WORD_FIELD(class,
 			      ESF_GZ_RX_PREFIX_HCLASS_TUN_OUTER_L4_CSUM) ==
 		ESE_GZ_RH_HCLASS_L4_CSUM_GOOD ?
-		PKT_RX_OUTER_L4_CKSUM_GOOD : PKT_RX_OUTER_L4_CKSUM_GOOD;
+		PKT_RX_OUTER_L4_CKSUM_GOOD : PKT_RX_OUTER_L4_CKSUM_BAD;
 }
 
 static uint32_t
@@ -413,7 +414,7 @@ sfc_ef100_rx_prefix_to_offloads(const struct sfc_ef100_rxq *rxq,
 		user_mark = EFX_OWORD_FIELD(rx_prefix[0],
 					    ESF_GZ_RX_PREFIX_USER_MARK);
 		if (user_mark != SFC_EF100_USER_MARK_INVALID) {
-			ol_flags |= PKT_RX_FDIR_ID;
+			ol_flags |= PKT_RX_FDIR | PKT_RX_FDIR_ID;
 			m->hash.fdir.hi = user_mark;
 		}
 	}
@@ -892,6 +893,20 @@ sfc_ef100_rx_intr_disable(struct sfc_dp_rxq *dp_rxq)
 	return 0;
 }
 
+static sfc_dp_rx_get_pushed_t sfc_ef100_rx_get_pushed;
+static unsigned int
+sfc_ef100_rx_get_pushed(struct sfc_dp_rxq *dp_rxq)
+{
+	struct sfc_ef100_rxq *rxq = sfc_ef100_rxq_by_dp_rxq(dp_rxq);
+
+	/*
+	 * The datapath keeps track only of added descriptors, since
+	 * the number of pushed descriptors always equals the number
+	 * of added descriptors due to enforced alignment.
+	 */
+	return rxq->added;
+}
+
 struct sfc_dp_rx sfc_ef100_rx = {
 	.dp = {
 		.name		= SFC_KVARG_DATAPATH_EF100,
@@ -919,5 +934,6 @@ struct sfc_dp_rx sfc_ef100_rx = {
 	.qdesc_status		= sfc_ef100_rx_qdesc_status,
 	.intr_enable		= sfc_ef100_rx_intr_enable,
 	.intr_disable		= sfc_ef100_rx_intr_disable,
+	.get_pushed		= sfc_ef100_rx_get_pushed,
 	.pkt_burst		= sfc_ef100_recv_pkts,
 };

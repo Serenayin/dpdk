@@ -867,10 +867,8 @@ i40evf_add_mac_addr(struct rte_eth_dev *dev,
 	int err;
 
 	if (rte_is_zero_ether_addr(addr)) {
-		PMD_DRV_LOG(ERR, "Invalid mac:%x:%x:%x:%x:%x:%x",
-			    addr->addr_bytes[0], addr->addr_bytes[1],
-			    addr->addr_bytes[2], addr->addr_bytes[3],
-			    addr->addr_bytes[4], addr->addr_bytes[5]);
+		PMD_DRV_LOG(ERR, "Invalid mac:" RTE_ETHER_ADDR_PRT_FMT,
+			    RTE_ETHER_ADDR_BYTES(addr));
 		return I40E_ERR_INVALID_MAC_ADDR;
 	}
 
@@ -1213,7 +1211,6 @@ i40evf_check_vf_reset_done(struct rte_eth_dev *dev)
 	if (i >= MAX_RESET_WAIT_CNT)
 		return -1;
 
-	vf->vf_reset = false;
 	vf->pend_msg &= ~PFMSG_RESET_IMPENDING;
 
 	return 0;
@@ -1392,6 +1389,7 @@ i40evf_handle_pf_event(struct rte_eth_dev *dev, uint8_t *msg,
 	switch (pf_msg->event) {
 	case VIRTCHNL_EVENT_RESET_IMPENDING:
 		PMD_DRV_LOG(DEBUG, "VIRTCHNL_EVENT_RESET_IMPENDING event");
+		vf->vf_reset = true;
 		rte_eth_dev_callback_process(dev,
 				RTE_ETH_EVENT_INTR_RESET, NULL);
 		break;
@@ -1660,7 +1658,6 @@ static int
 i40evf_driver_selected(struct rte_devargs *devargs)
 {
 	struct rte_kvargs *kvlist;
-	const char *key = "driver";
 	int ret = 0;
 
 	if (devargs == NULL)
@@ -1670,13 +1667,13 @@ i40evf_driver_selected(struct rte_devargs *devargs)
 	if (kvlist == NULL)
 		return 0;
 
-	if (!rte_kvargs_count(kvlist, key))
+	if (!rte_kvargs_count(kvlist, RTE_DEVARGS_KEY_DRIVER))
 		goto exit;
 
 	/* i40evf driver selected when there's a key-value pair:
 	 * driver=i40evf
 	 */
-	if (rte_kvargs_process(kvlist, key,
+	if (rte_kvargs_process(kvlist, RTE_DEVARGS_KEY_DRIVER,
 			       i40evf_check_driver_handler, NULL) < 0)
 		goto exit;
 
@@ -2131,10 +2128,8 @@ i40evf_add_del_all_mac_addr(struct rte_eth_dev *dev, bool add)
 			list->list[j].type = (j == 0 ?
 					      VIRTCHNL_ETHER_ADDR_PRIMARY :
 					      VIRTCHNL_ETHER_ADDR_EXTRA);
-			PMD_DRV_LOG(DEBUG, "add/rm mac:%x:%x:%x:%x:%x:%x",
-				    addr->addr_bytes[0], addr->addr_bytes[1],
-				    addr->addr_bytes[2], addr->addr_bytes[3],
-				    addr->addr_bytes[4], addr->addr_bytes[5]);
+			PMD_DRV_LOG(DEBUG, "add/rm mac:" RTE_ETHER_ADDR_PRT_FMT,
+				    RTE_ETHER_ADDR_BYTES(addr));
 			j++;
 		}
 		list->vsi_id = vf->vsi_res->vsi_id;
@@ -2468,6 +2463,7 @@ i40evf_dev_close(struct rte_eth_dev *dev)
 {
 	struct i40e_hw *hw = I40E_DEV_PRIVATE_TO_HW(dev->data->dev_private);
 	struct i40e_vf *vf = I40EVF_DEV_PRIVATE_TO_VF(dev->data->dev_private);
+	struct rte_pci_device *pci_dev = RTE_ETH_DEV_TO_PCI(dev);
 	int ret;
 
 	if (rte_eal_process_type() != RTE_PROC_PRIMARY)
@@ -2489,6 +2485,16 @@ i40evf_dev_close(struct rte_eth_dev *dev)
 	i40evf_reset_vf(dev);
 	i40e_shutdown_adminq(hw);
 	i40evf_disable_irq0(hw);
+
+	/*
+	 * If the VF is reset via VFLR, the device will be knocked out of bus
+	 * master mode, and the driver will fail to recover from the reset. Fix
+	 * this by enabling bus mastering after every reset. In a non-VFLR case,
+	 * the bus master bit will not be disabled, and this call will have no
+	 * effect.
+	 */
+	if (vf->vf_reset && !rte_pci_set_bus_master(pci_dev, true))
+		vf->vf_reset = false;
 
 	rte_free(vf->vf_res);
 	vf->vf_res = NULL;
@@ -2939,13 +2945,8 @@ i40evf_add_del_mc_addr_list(struct rte_eth_dev *dev,
 
 	for (i = 0; i < mc_addrs_num; i++) {
 		if (!I40E_IS_MULTICAST(mc_addrs[i].addr_bytes)) {
-			PMD_DRV_LOG(ERR, "Invalid mac:%x:%x:%x:%x:%x:%x",
-				    mc_addrs[i].addr_bytes[0],
-				    mc_addrs[i].addr_bytes[1],
-				    mc_addrs[i].addr_bytes[2],
-				    mc_addrs[i].addr_bytes[3],
-				    mc_addrs[i].addr_bytes[4],
-				    mc_addrs[i].addr_bytes[5]);
+			PMD_DRV_LOG(ERR, "Invalid mac:" RTE_ETHER_ADDR_PRT_FMT,
+				    RTE_ETHER_ADDR_BYTES(&mc_addrs[i]));
 			return -EINVAL;
 		}
 

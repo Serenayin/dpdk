@@ -119,6 +119,15 @@ rq_cn9k_cfg(struct nix *nix, struct roc_nix_rq *rq, bool cfg, bool ena)
 	aq->rq.qint_idx = rq->qid % nix->qints;
 	aq->rq.xqe_drop_ena = 1;
 
+	/* If RED enabled, then fill enable for all cases */
+	if (rq->red_pass && (rq->red_pass >= rq->red_drop)) {
+		aq->rq.spb_aura_pass = rq->spb_red_pass;
+		aq->rq.lpb_aura_pass = rq->red_pass;
+
+		aq->rq.spb_aura_drop = rq->spb_red_drop;
+		aq->rq.lpb_aura_drop = rq->red_drop;
+	}
+
 	if (cfg) {
 		if (rq->sso_ena) {
 			/* SSO mode */
@@ -155,6 +164,14 @@ rq_cn9k_cfg(struct nix *nix, struct roc_nix_rq *rq, bool cfg, bool ena)
 		aq->rq_mask.rq_int_ena = ~aq->rq_mask.rq_int_ena;
 		aq->rq_mask.qint_idx = ~aq->rq_mask.qint_idx;
 		aq->rq_mask.xqe_drop_ena = ~aq->rq_mask.xqe_drop_ena;
+
+		if (rq->red_pass && (rq->red_pass >= rq->red_drop)) {
+			aq->rq_mask.spb_aura_pass = ~aq->rq_mask.spb_aura_pass;
+			aq->rq_mask.lpb_aura_pass = ~aq->rq_mask.lpb_aura_pass;
+
+			aq->rq_mask.spb_aura_drop = ~aq->rq_mask.spb_aura_drop;
+			aq->rq_mask.lpb_aura_drop = ~aq->rq_mask.lpb_aura_drop;
+		}
 	}
 
 	return 0;
@@ -244,6 +261,23 @@ rq_cfg(struct nix *nix, struct roc_nix_rq *rq, bool cfg, bool ena)
 	aq->rq.qint_idx = rq->qid % nix->qints;
 	aq->rq.xqe_drop_ena = 1;
 
+	/* If RED enabled, then fill enable for all cases */
+	if (rq->red_pass && (rq->red_pass >= rq->red_drop)) {
+		aq->rq.spb_pool_pass = rq->red_pass;
+		aq->rq.spb_aura_pass = rq->red_pass;
+		aq->rq.lpb_pool_pass = rq->red_pass;
+		aq->rq.lpb_aura_pass = rq->red_pass;
+		aq->rq.wqe_pool_pass = rq->red_pass;
+		aq->rq.xqe_pass = rq->red_pass;
+
+		aq->rq.spb_pool_drop = rq->red_drop;
+		aq->rq.spb_aura_drop = rq->red_drop;
+		aq->rq.lpb_pool_drop = rq->red_drop;
+		aq->rq.lpb_aura_drop = rq->red_drop;
+		aq->rq.wqe_pool_drop = rq->red_drop;
+		aq->rq.xqe_drop = rq->red_drop;
+	}
+
 	if (cfg) {
 		if (rq->sso_ena) {
 			/* SSO mode */
@@ -296,6 +330,22 @@ rq_cfg(struct nix *nix, struct roc_nix_rq *rq, bool cfg, bool ena)
 		aq->rq_mask.rq_int_ena = ~aq->rq_mask.rq_int_ena;
 		aq->rq_mask.qint_idx = ~aq->rq_mask.qint_idx;
 		aq->rq_mask.xqe_drop_ena = ~aq->rq_mask.xqe_drop_ena;
+
+		if (rq->red_pass && (rq->red_pass >= rq->red_drop)) {
+			aq->rq_mask.spb_pool_pass = ~aq->rq_mask.spb_pool_pass;
+			aq->rq_mask.spb_aura_pass = ~aq->rq_mask.spb_aura_pass;
+			aq->rq_mask.lpb_pool_pass = ~aq->rq_mask.lpb_pool_pass;
+			aq->rq_mask.lpb_aura_pass = ~aq->rq_mask.lpb_aura_pass;
+			aq->rq_mask.wqe_pool_pass = ~aq->rq_mask.wqe_pool_pass;
+			aq->rq_mask.xqe_pass = ~aq->rq_mask.xqe_pass;
+
+			aq->rq_mask.spb_pool_drop = ~aq->rq_mask.spb_pool_drop;
+			aq->rq_mask.spb_aura_drop = ~aq->rq_mask.spb_aura_drop;
+			aq->rq_mask.lpb_pool_drop = ~aq->rq_mask.lpb_pool_drop;
+			aq->rq_mask.lpb_aura_drop = ~aq->rq_mask.lpb_aura_drop;
+			aq->rq_mask.wqe_pool_drop = ~aq->rq_mask.wqe_pool_drop;
+			aq->rq_mask.xqe_drop = ~aq->rq_mask.xqe_drop;
+		}
 	}
 
 	return 0;
@@ -537,12 +587,12 @@ sqb_pool_populate(struct roc_nix *roc_nix, struct roc_nix_sq *sq)
 	aura.fc_ena = 1;
 	aura.fc_addr = (uint64_t)sq->fc;
 	aura.fc_hyst_bits = 0; /* Store count on all updates */
-	rc = roc_npa_pool_create(&sq->aura_handle, blk_sz, nb_sqb_bufs, &aura,
+	rc = roc_npa_pool_create(&sq->aura_handle, blk_sz, NIX_MAX_SQB, &aura,
 				 &pool);
 	if (rc)
 		goto fail;
 
-	sq->sqe_mem = plt_zmalloc(blk_sz * nb_sqb_bufs, blk_sz);
+	sq->sqe_mem = plt_zmalloc(blk_sz * NIX_MAX_SQB, blk_sz);
 	if (sq->sqe_mem == NULL) {
 		rc = NIX_ERR_NO_MEM;
 		goto nomem;
@@ -550,11 +600,13 @@ sqb_pool_populate(struct roc_nix *roc_nix, struct roc_nix_sq *sq)
 
 	/* Fill the initial buffers */
 	iova = (uint64_t)sq->sqe_mem;
-	for (count = 0; count < nb_sqb_bufs; count++) {
+	for (count = 0; count < NIX_MAX_SQB; count++) {
 		roc_npa_aura_op_free(sq->aura_handle, 0, iova);
 		iova += blk_sz;
 	}
 	roc_npa_aura_op_range_set(sq->aura_handle, (uint64_t)sq->sqe_mem, iova);
+	roc_npa_aura_limit_modify(sq->aura_handle, sq->nb_sqb_bufs);
+	sq->aura_sqb_bufs = NIX_MAX_SQB;
 
 	return rc;
 nomem:
@@ -582,6 +634,7 @@ sq_cn9k_init(struct nix *nix, struct roc_nix_sq *sq, uint32_t rr_quantum,
 	aq->sq.default_chan = nix->tx_chan_base;
 	aq->sq.sqe_stype = NIX_STYPE_STF;
 	aq->sq.ena = 1;
+	aq->sq.sso_ena = !!sq->sso_ena;
 	if (aq->sq.max_sqe_size == NIX_MAXSQESZ_W8)
 		aq->sq.sqe_stype = NIX_STYPE_STP;
 	aq->sq.sqb_aura = roc_npa_aura_handle_to_aura(sq->aura_handle);
@@ -679,6 +732,7 @@ sq_init(struct nix *nix, struct roc_nix_sq *sq, uint32_t rr_quantum,
 	aq->sq.default_chan = nix->tx_chan_base;
 	aq->sq.sqe_stype = NIX_STYPE_STF;
 	aq->sq.ena = 1;
+	aq->sq.sso_ena = !!sq->sso_ena;
 	if (aq->sq.max_sqe_size == NIX_MAXSQESZ_W8)
 		aq->sq.sqe_stype = NIX_STYPE_STP;
 	aq->sq.sqb_aura = roc_npa_aura_handle_to_aura(sq->aura_handle);
